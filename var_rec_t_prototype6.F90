@@ -4652,6 +4652,53 @@ contains
     end if
   end function constructor
 
+  ! pure subroutine k_exact_to_var( this, p, grid )
+  !   use set_constants,     only : zero
+  !   use index_conversion,  only : cell_face_nbors
+  !   use grid_derived_type, only : grid_type
+  !   class(rec_cell_t), intent(inout)    :: this
+  !   type(monomial_basis_t), intent(in)  :: p
+  !   type(grid_derived_type), intent(in) :: grid
+  !   integer :: n_nbor, i
+  !   this%variational = .true.
+  !   n_nbor = 2*p%n_dim
+  !   this%n_nbor = n_nbor
+  !   if ( allocated(this%nbor_block) ) deallocate( this%nbor_block )
+  !   if ( allocated(this%nbor_idx  ) ) deallocate( this%nbor_idx   )
+  !   if ( allocated(this%face_id   ) ) deallocate( this%face_id    )
+  !   if ( allocated(this%Ainv      ) ) deallocate( this%Ainv       )
+  !   if ( allocated(this%col_scale ) ) deallocate( this%col_scale  )
+  !   if ( allocated(this%RHS       ) ) deallocate( this%RHS        )
+  !   if ( allocated(this%A         ) ) deallocate( this%A          )
+  !   if ( allocated(this%D         ) ) deallocate( this%D          )
+  !   if ( allocated(this%LU        ) ) deallocate( this%LU         )
+  !   if ( allocated(this%P         ) ) deallocate( this%P          )
+  !   if ( allocated(this%B         ) ) deallocate( this%B          )
+  !   if ( allocated(this%C         ) ) deallocate( this%C          )
+  !   allocate( this%nbor_block(  n_nbor ) )
+  !   allocate( this%nbor_idx(    n_nbor ) )
+  !   allocate( this%face_id(     n_nbor ) )
+  !   call cell_face_nbors( p%n_dim, this%self_idx, [(1,i=1,p%n_dim)],  &
+  !                         grid%gblock(this%self_block)%n_cells(1:p%n_dim),               &
+  !                         this%nbor_idx, this%face_id, this%n_interior )
+
+  !   allocate( this%RHS(p%n_terms-1, n_vars ) )
+  !   allocate( this%A(  p%n_terms-1, p%n_terms-1 ) )
+  !   allocate( this%D(  p%n_terms-1, p%n_terms-1 ) )
+  !   allocate( this%LU( p%n_terms-1, p%n_terms-1 ) )
+  !   allocate( this%P(  p%n_terms-1, p%n_terms-1 ) )
+  !   allocate( this%B(  p%n_terms-1, p%n_terms-1, n_interior ) )
+  !   allocate( this%C(  p%n_terms-1, p%n_terms-1, n_interior ) )
+  !   this%RHS = zero
+  !   this%A   = zero
+  !   this%B   = zero
+  !   this%C   = zero
+  !   this%D   = zero
+  !   this%LU  = zero
+  !   this%P   = zero
+
+  ! end subroutine k_exact_to_var
+
   pure function evaluate_reconstruction( this, p, point, n_terms,              &
                                          n_var, var_idx ) result(val)
     use set_constants, only : zero
@@ -6181,7 +6228,7 @@ program main
   allocate( space_origin(n_dim,n_vars) )
   space_scale = 0.2_dp
   space_origin = 0.0_dp
-  space_origin(1:2,1) = 0.5_dp
+  space_origin(1:n_dim,1) = 0.5_dp
   allocate( eval_fun, source=cts_t(n_dim,n_vars,rand_coefs=.true.,space_scale=space_scale, space_origin=space_origin) )
 
   
