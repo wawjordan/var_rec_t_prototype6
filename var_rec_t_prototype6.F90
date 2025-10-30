@@ -4570,6 +4570,7 @@ module reconstruct_cell_derived_type
     procedure, public, pass :: get_nbor_contribution
     procedure, public, pass :: get_self_RHS_contribution
     procedure, public, pass :: get_nbor_RHS_contribution
+    procedure, public, pass :: k_exact_to_var, var_to_k_exact
   end type rec_cell_t
 
   interface rec_cell_t
@@ -4647,57 +4648,89 @@ contains
       this%face_id    = face_id
       this%n_interior = n_interior
     else
-      allocate( this%Ainv(  p%n_terms-1, n_nbor ) ); this%Ainv  = zero
-      allocate( this%col_scale( p%n_terms-1     ) ); this%col_scale = one
+      allocate( this%Ainv(  p%n_terms-1, n_nbor ) )
+      allocate( this%col_scale( p%n_terms-1     ) )
+      this%Ainv      = zero
+      this%col_scale = one
     end if
   end function constructor
 
-  ! pure subroutine k_exact_to_var( this, p, grid )
-  !   use set_constants,     only : zero
-  !   use index_conversion,  only : cell_face_nbors
-  !   use grid_derived_type, only : grid_type
-  !   class(rec_cell_t), intent(inout)    :: this
-  !   type(monomial_basis_t), intent(in)  :: p
-  !   type(grid_derived_type), intent(in) :: grid
-  !   integer :: n_nbor, i
-  !   this%variational = .true.
-  !   n_nbor = 2*p%n_dim
-  !   this%n_nbor = n_nbor
-  !   if ( allocated(this%nbor_block) ) deallocate( this%nbor_block )
-  !   if ( allocated(this%nbor_idx  ) ) deallocate( this%nbor_idx   )
-  !   if ( allocated(this%face_id   ) ) deallocate( this%face_id    )
-  !   if ( allocated(this%Ainv      ) ) deallocate( this%Ainv       )
-  !   if ( allocated(this%col_scale ) ) deallocate( this%col_scale  )
-  !   if ( allocated(this%RHS       ) ) deallocate( this%RHS        )
-  !   if ( allocated(this%A         ) ) deallocate( this%A          )
-  !   if ( allocated(this%D         ) ) deallocate( this%D          )
-  !   if ( allocated(this%LU        ) ) deallocate( this%LU         )
-  !   if ( allocated(this%P         ) ) deallocate( this%P          )
-  !   if ( allocated(this%B         ) ) deallocate( this%B          )
-  !   if ( allocated(this%C         ) ) deallocate( this%C          )
-  !   allocate( this%nbor_block(  n_nbor ) )
-  !   allocate( this%nbor_idx(    n_nbor ) )
-  !   allocate( this%face_id(     n_nbor ) )
-  !   call cell_face_nbors( p%n_dim, this%self_idx, [(1,i=1,p%n_dim)],  &
-  !                         grid%gblock(this%self_block)%n_cells(1:p%n_dim),               &
-  !                         this%nbor_idx, this%face_id, this%n_interior )
+  pure subroutine k_exact_to_var( this, p, n_cells )
+    use set_constants,     only : zero
+    use index_conversion,  only : cell_face_nbors
+    class(rec_cell_t), intent(inout)    :: this
+    type(monomial_basis_t), intent(in)  :: p
+    integer, dimension(:),  intent(in)  :: n_cells
+    integer :: n_nbor, i
+    this%variational = .true.
+    n_nbor = 2*p%n_dim
+    this%n_nbor = n_nbor
+    if ( allocated(this%nbor_block) ) deallocate( this%nbor_block )
+    if ( allocated(this%nbor_idx  ) ) deallocate( this%nbor_idx   )
+    if ( allocated(this%face_id   ) ) deallocate( this%face_id    )
+    if ( allocated(this%Ainv      ) ) deallocate( this%Ainv       )
+    if ( allocated(this%col_scale ) ) deallocate( this%col_scale  )
+    if ( allocated(this%RHS       ) ) deallocate( this%RHS        )
+    if ( allocated(this%A         ) ) deallocate( this%A          )
+    if ( allocated(this%D         ) ) deallocate( this%D          )
+    if ( allocated(this%LU        ) ) deallocate( this%LU         )
+    if ( allocated(this%P         ) ) deallocate( this%P          )
+    if ( allocated(this%B         ) ) deallocate( this%B          )
+    if ( allocated(this%C         ) ) deallocate( this%C          )
+    allocate( this%RHS(p%n_terms-1, this%n_vars ) )
+    allocate( this%A(  p%n_terms-1, p%n_terms-1 ) )
+    allocate( this%D(  p%n_terms-1, p%n_terms-1 ) )
+    allocate( this%LU( p%n_terms-1, p%n_terms-1 ) )
+    allocate( this%P(  p%n_terms-1, p%n_terms-1 ) )
+    allocate( this%nbor_block(  n_nbor ) )
+    allocate( this%nbor_idx(    n_nbor ) )
+    allocate( this%face_id(     n_nbor ) )
+    call cell_face_nbors( p%n_dim, this%self_idx, [(1,i=1,p%n_dim)],  &
+                          n_cells(1:p%n_dim),               &
+                          this%nbor_idx, this%face_id, this%n_interior )
+    allocate( this%B(  p%n_terms-1, p%n_terms-1, this%n_interior ) )
+    allocate( this%C(  p%n_terms-1, p%n_terms-1, this%n_interior ) )
+    this%RHS = zero
+    this%A   = zero
+    this%B   = zero
+    this%C   = zero
+    this%D   = zero
+    this%LU  = zero
+    this%P   = zero
+  end subroutine k_exact_to_var
 
-  !   allocate( this%RHS(p%n_terms-1, n_vars ) )
-  !   allocate( this%A(  p%n_terms-1, p%n_terms-1 ) )
-  !   allocate( this%D(  p%n_terms-1, p%n_terms-1 ) )
-  !   allocate( this%LU( p%n_terms-1, p%n_terms-1 ) )
-  !   allocate( this%P(  p%n_terms-1, p%n_terms-1 ) )
-  !   allocate( this%B(  p%n_terms-1, p%n_terms-1, n_interior ) )
-  !   allocate( this%C(  p%n_terms-1, p%n_terms-1, n_interior ) )
-  !   this%RHS = zero
-  !   this%A   = zero
-  !   this%B   = zero
-  !   this%C   = zero
-  !   this%D   = zero
-  !   this%LU  = zero
-  !   this%P   = zero
 
-  ! end subroutine k_exact_to_var
+  pure subroutine var_to_k_exact( this, p, n_nbors, nbor_block, nbor_idx )
+    use set_constants,     only : zero, one
+    class(rec_cell_t), intent(inout)    :: this
+    type(monomial_basis_t), intent(in)  :: p
+    integer,                intent(in)  :: n_nbors
+    integer, dimension(:),  intent(in)  :: nbor_block
+    integer, dimension(:),  intent(in)  :: nbor_idx
+    integer :: i
+    this%variational = .false.
+    this%n_nbor = n_nbors
+    if ( allocated(this%nbor_block) ) deallocate( this%nbor_block )
+    if ( allocated(this%nbor_idx  ) ) deallocate( this%nbor_idx   )
+    if ( allocated(this%face_id   ) ) deallocate( this%face_id    )
+    if ( allocated(this%Ainv      ) ) deallocate( this%Ainv       )
+    if ( allocated(this%col_scale ) ) deallocate( this%col_scale  )
+    if ( allocated(this%RHS       ) ) deallocate( this%RHS        )
+    if ( allocated(this%A         ) ) deallocate( this%A          )
+    if ( allocated(this%D         ) ) deallocate( this%D          )
+    if ( allocated(this%LU        ) ) deallocate( this%LU         )
+    if ( allocated(this%P         ) ) deallocate( this%P          )
+    if ( allocated(this%B         ) ) deallocate( this%B          )
+    if ( allocated(this%C         ) ) deallocate( this%C          )
+    allocate( this%nbor_block(  n_nbors ) )
+    allocate( this%nbor_idx(    n_nbors ) )
+    allocate( this%Ainv(  p%n_terms-1, n_nbors ) )
+    allocate( this%col_scale( p%n_terms-1     ) )
+    this%nbor_block = nbor_block(1:n_nbors)
+    this%nbor_idx   = nbor_idx(  1:n_nbors)
+    this%Ainv      = zero
+    this%col_scale = one
+  end subroutine var_to_k_exact
 
   pure function evaluate_reconstruction( this, p, point, n_terms,              &
                                          n_var, var_idx ) result(val)
@@ -4931,6 +4964,7 @@ module rec_block_derived_type
     procedure, public, pass :: eval => evaluate_block_rec
     procedure, public, pass :: set_cell_avgs => set_cell_avgs_fun
     procedure,         pass :: get_cell_h_ref
+    procedure,         pass :: init_cell_k, init_cell_v
     procedure, public, pass :: init_cells
     procedure, public, pass :: get_cell_error, get_error_norm
     procedure,         pass :: get_cell_LHS_var, get_cell_RHS_var
@@ -4938,6 +4972,7 @@ module rec_block_derived_type
     procedure,         pass :: get_cell_update, get_cell_residual
     procedure,         pass :: residual_norm
     procedure,         pass :: SOR_iteration
+    procedure,         pass :: k_exact_to_var, var_to_k_exact
   end type rec_block_t
 
   interface rec_block_t
@@ -5054,9 +5089,49 @@ contains
                                     mask_(i) )
       end associate
     end do
-
     deallocate( nbor_block, nbor_idx, nbor_face_id )
   end function constructor
+
+  subroutine k_exact_to_var( this, grid, term_start, term_end, mask_v )
+    use grid_derived_type, only : grid_type
+    class(rec_block_t),    intent(inout) :: this
+    type(grid_type),       intent(in)    :: grid
+    integer,               intent(in)    :: term_start, term_end
+    logical, dimension(:), intent(in)    :: mask_v
+    integer :: i, j
+
+    do i = 1,this%n_cells_total
+      if (.not. mask_v(i)) cycle
+      call this%cells(i)%k_exact_to_var( this%p, grid%gblock(this%block_num)%n_cells )
+      call this%init_cell_v( i, grid, term_start, term_end, this%cells(i)%n_vars, [(j,j=1,this%cells(i)%n_vars)] )
+    end do
+  end subroutine k_exact_to_var
+
+  subroutine var_to_k_exact( this, grid, term_start, term_end, mask_k )
+    use grid_derived_type, only : grid_type
+    class(rec_block_t),    intent(inout) :: this
+    type(grid_type),       intent(in)    :: grid
+    integer,               intent(in)    :: term_start, term_end
+    logical, dimension(:), intent(in)    :: mask_k
+    integer :: i, m, n, min_sz, max_sz, n_nbors
+    integer, dimension(:), allocatable :: nbor_block, nbor_idx
+    real(dp), dimension(:,:), allocatable :: LHS
+
+    min_sz = (3 * this%p%n_terms)/2
+    max_sz = 6*min_sz
+    allocate( nbor_block(max_sz), nbor_idx(max_sz) )
+
+    do i = 1,this%n_cells_total
+      if (.not. mask_k(i)) cycle
+      call get_k_exact_nbors( this, grid, this%block_num, i, min_sz, n_nbors, nbor_block, nbor_idx )
+      call this%cells(i)%var_to_k_exact( this%p, n_nbors, nbor_block, nbor_idx )
+      m = n_nbors
+      n = this%p%n_terms
+      allocate( LHS(m,n) )
+      call this%init_cell_k( LHS, i, term_end )
+      deallocate( LHS )
+    end do
+  end subroutine var_to_k_exact
 
   pure function evaluate_block_rec( this, cell_idx, x, vars, n_terms ) result(val)
     use index_conversion, only : local2global
@@ -5130,8 +5205,11 @@ contains
     integer, dimension(6*min_sz), intent(out) :: nbor_block, nbor_idx, nbor_face_id
     integer :: i
 
+    nbor_face_id = 0
+    n_interior   = 0
+
     if ( .not. variational ) then
-      call get_k_exact_nbors( this, grid, blk, lin_idx, min_sz, n_nbors, n_interior, nbor_block, nbor_idx, nbor_face_id )
+      call get_k_exact_nbors( this, grid, blk, lin_idx, min_sz, n_nbors, nbor_block, nbor_idx )
     else
       n_nbors    = 2*this%n_dim
       n_interior = 0
@@ -5231,33 +5309,78 @@ contains
     end do
   end function get_error_norm
 
+  subroutine init_cell_v( this, lin_idx, grid, term_start, term_end, n_var, var_idx )
+    use grid_derived_type, only : grid_type
+    class(rec_block_t),       intent(inout) :: this
+    integer,                  intent(in)    :: lin_idx
+    type(grid_type),          intent(in)    :: grid
+    integer,                  intent(in)    :: term_start, term_end, n_var
+    integer, dimension(:),    intent(in)    :: var_idx
+    integer :: i, n, m
+    i = lin_idx
+    call this%get_cell_LHS_var( grid, i, term_start, term_end )
+    this%cells(i)%RHS = this%get_cell_RHS_var( i, term_start, term_end,     &
+                                                  n_var, var_idx )
+  end subroutine init_cell_v
+
+  subroutine init_cell_k( this, LHS, lin_idx, term_end )
+    use math,              only : compute_pseudo_inverse
+    class(rec_block_t),       intent(inout) :: this
+    real(dp), dimension(:,:), intent(inout) :: LHS
+    integer,                  intent(in)    :: lin_idx
+    integer,                  intent(in)    :: term_end
+    integer :: i, n, m
+    i = lin_idx
+    m = this%cells(i)%n_nbor
+    n = this%p%n_terms
+    call this%get_cell_LHS_k( i, term_end, m, n, LHS, scale=.true., col_scale=this%cells(i)%col_scale(1:term_end-1) )
+    call compute_pseudo_inverse( m, n, LHS(1:m,1:n), this%cells(i)%Ainv(1:n,1:m) )
+  end subroutine init_cell_k
+
   subroutine init_cells( this, grid, term_start, term_end, n_var, var_idx )
     use grid_derived_type, only : grid_type 
     use string_stuff,      only : progress_line
-    use math,              only : compute_pseudo_inverse
     class(rec_block_t),     intent(inout) :: this
     type(grid_type),        intent(in)    :: grid
     integer,                intent(in)    :: term_start, term_end, n_var
     integer, dimension(:),  intent(in)    :: var_idx
-    integer :: i, n, m
+    integer :: i, cnt, n_v, n_k, n, m
     real(dp), dimension(:,:), allocatable :: LHS
-    m = maxval(this%cells%n_nbor)
-    n = this%p%n_terms
-    allocate( LHS(m,n) )
+    n_v = 0
+    n_k = 0
     do i = 1,this%n_cells_total
-      call progress_line('initializing cell ',i,this%n_cells_total)
-
       if ( this%cells(i)%variational ) then
-        call this%get_cell_LHS_var( grid, i, term_start, term_end )
-        this%cells(i)%RHS = this%get_cell_RHS_var( i, term_start, term_end,     &
-                                                   n_var, var_idx )
+        n_v = n_v + 1
       else
-        call this%get_cell_LHS_k( i, term_end, m, n, LHS, scale=.true., col_scale=this%cells(i)%col_scale(1:term_end-1) )
-        call compute_pseudo_inverse( m, n, LHS(1:m,1:n), this%cells(i)%Ainv(1:n,1:m) )
+        n_k = n_k + 1
       end if
     end do
-    deallocate( LHS )
-    write(*,*)
+
+    if ( n_k > 0 ) then
+      m = maxval(this%cells%n_nbor)
+      n = this%p%n_terms
+      allocate( LHS(m,n) )
+      cnt = 0
+      do i = 1,this%n_cells_total
+        if ( this%cells(i)%variational ) cycle
+        cnt = cnt + 1
+        call progress_line('initializing k-exact cell ',cnt,n_k)
+        call this%init_cell_k( LHS, i, term_end )
+      end do
+      deallocate( LHS )
+      write(*,*)
+    end if
+
+    if ( n_v > 0 ) then
+      cnt = 0
+      do i = 1,this%n_cells_total
+        if ( .not. this%cells(i)%variational ) cycle
+        cnt = cnt + 1
+        call progress_line('initializing var-rec cell ',cnt,n_v)
+        call this%init_cell_v( i, grid, term_start, term_end, n_var, var_idx )
+      end do
+      write(*,*)
+    end if
   end subroutine init_cells
 
 
@@ -5303,22 +5426,20 @@ contains
       end do
     end function
 
-    pure subroutine get_k_exact_nbors( this, grid, blk, lin_idx, min_sz, n_nbors, n_interior, nbor_block, nbor_idx, nbor_face_id )
+    pure subroutine get_k_exact_nbors( this, grid, blk, lin_idx, min_sz, n_nbors, nbor_block, nbor_idx )
       use index_conversion,  only : global2local_bnd, local2global_bnd
       use stencil_growing_routines, only : grow_stencil_basic
       use grid_derived_type, only : grid_type
       class(rec_block_t),     intent(in)  :: this
       type(grid_type),        intent(in)  :: grid
       integer,                intent(in)  :: blk, lin_idx, min_sz
-      integer,                intent(out) :: n_nbors, n_interior
-      integer, dimension(6*min_sz), intent(out) :: nbor_block, nbor_idx, nbor_face_id
+      integer,                intent(out) :: n_nbors
+      integer, dimension(6*min_sz), intent(out) :: nbor_block, nbor_idx
       integer, dimension(6*min_sz,4) :: idx_list
       integer, dimension(3) :: idx_tmp, lo, hi
       integer :: i
       nbor_block = 0
       nbor_idx   = 0
-      nbor_face_id = 0
-      n_interior = 0
 
       lo = 1
       hi = 1
