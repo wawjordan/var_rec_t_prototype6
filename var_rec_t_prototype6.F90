@@ -747,24 +747,22 @@ contains
 
   pure subroutine sort_stencil_idx( n_stencil, stencil )
     use quick_sort, only : sort
+    use index_conversion, only : local2global_bnd
     integer,                         intent(in)    :: n_stencil
-    integer, dimension(3,n_stencil), intent(inout) :: stencil
-    integer, dimension(3,n_stencil) :: stencil_tmp
-    integer, dimension(3) :: min_bnd, max_bnd, range
+    integer, dimension(:,:),         intent(inout) :: stencil
+    integer, dimension(4,n_stencil) :: stencil_tmp
+    integer, dimension(4) :: min_bnd, max_bnd, range
     integer, dimension(n_stencil)   :: ind1, ind2
     integer :: i
     min_bnd = minval(stencil,dim=2)
     max_bnd = maxval(stencil,dim=2)
     range   = max_bnd - min_bnd + 1
     do i = 1,n_stencil
-      ind1(i) = ( stencil(1,i) - min_bnd(1) )                              &
-              + ( stencil(2,i) - min_bnd(2) ) * range(1)                   &
-              + ( stencil(3,i) - min_bnd(3) ) * range(1) * range(2)
+      ind1(i) = local2global_bnd(stencil(:,i),min_bnd,max_bnd)
       ind2(i) = i
     end do
-    ! call qsort( n_stencil, ind1, ind2 )
     call sort(ind1,idx=ind2)
-    stencil_tmp = stencil
+    stencil_tmp = stencil(:,1:n_stencil)
     do i = 1,n_stencil
       stencil(:,i) = stencil_tmp(:,ind2(i))
     end do
@@ -1141,14 +1139,33 @@ module stencil_growing_routines
 
   contains
 
-  pure subroutine grow_stencil_basic( block_id, idx, N_cells, sz_in, sz_out, idx_list )
+  pure subroutine grow_stencil_basic( block_id, idx, N_cells, sz_in, sz_out, nbor_block, nbor_idx, sort_idx )
     use stencil_cell_derived_type, only : block_info
+    use index_conversion,          only : local2global_bnd
+    use stencil_indexing,          only : sort_stencil_idx
     integer,                              intent(in)  :: block_id
     integer, dimension(3),                intent(in)  :: idx, N_cells
     integer,                              intent(in)  :: sz_in
     integer,                              intent(out) :: sz_out
-    integer, dimension(6*sz_in,4),        intent(out) :: idx_list
-    call grow_stencil_new_connected_block( block_id, idx, [block_info(block_id,N_cells)], sz_in, sz_out, idx_list )
+    integer, dimension(6*sz_in),          intent(out) :: nbor_block, nbor_idx
+    logical, optional,                    intent(in)  :: sort_idx
+    type(block_info), dimension(1) :: bi
+    integer, dimension(4,6*sz_in) :: idx_list
+    integer :: i
+    bi(1) = block_info(block_id,N_cells)
+    call grow_stencil_new_connected_block( block_id, idx, bi, sz_in, sz_out, idx_list )
+    call bi%destroy()
+
+    if ( present(sort_idx) ) then
+      if ( sort_idx ) call sort_stencil_idx(sz_out,idx_list)
+    end if
+
+    nbor_block = 0
+    nbor_idx   = 0
+    do i = 1,sz_out
+      nbor_block(i) = idx_list(1,i)
+      nbor_idx(i)   = local2global_bnd( idx_list(2:4,i), [1,1,1], N_cells )
+    end do
   end subroutine grow_stencil_basic
 
   pure function get_max_degree( block_id, idx, N_cells, sz_in ) result(max_degree)
@@ -1159,7 +1176,6 @@ module stencil_growing_routines
     integer                                           :: max_degree
     type(stencil_cell_t), dimension(6*sz_in) :: stencil
     integer :: sz_out
-    integer, dimension(6*sz_in,4) :: idx_list
     call build_stencil_connected_block( block_id, idx, sz_in, [block_info(block_id,N_cells)], &
                                         sz_out, stencil, balanced=.true. )
     max_degree = maxval(stencil%degree)
@@ -1173,7 +1189,7 @@ module stencil_growing_routines
     type(block_info), dimension(:),       intent(in)  :: block_info_list
     integer,                              intent(in)  :: sz_in
     integer,                              intent(out) :: sz_out
-    integer, dimension(6*sz_in,4),        intent(out) :: idx_list
+    integer, dimension(4,6*sz_in),        intent(out) :: idx_list
     type(stencil_cell_t), dimension(6*sz_in) :: stencil
     integer :: i
     logical :: balanced
@@ -1185,10 +1201,8 @@ module stencil_growing_routines
     
     idx_list = 0
     do i = 1,sz_out
-      idx_list(i,:) = stencil(i)%idx
+      idx_list(:,i) = stencil(i)%idx
     end do
-
-    ! call sort_stencil_idx(sz_out,idx_list)
 
   end subroutine grow_stencil_new_connected_block
 
@@ -1204,7 +1218,7 @@ module stencil_growing_routines
     integer,                                      intent(in)  :: n_stencil
     type(block_info),     dimension(:),           intent(in)  :: block_info_list
     integer,                                      intent(out) :: n_out
-    type(stencil_cell_t), dimension(3*n_stencil), intent(out) :: stencil
+    type(stencil_cell_t), dimension(6*n_stencil), intent(out) :: stencil
     logical,              optional,               intent(in)  :: balanced
     integer :: n, i, cnt, in_it, out_it, min_degree, current_min_degree
     integer :: stencil_idx, face_idx, out_it_max, in_it_max
@@ -4145,7 +4159,7 @@ module cross_term_sinusoid
 contains
   function constructor( n_dim, n_eq, mean, space_coefs, space_scale,           &
                         space_origin, time_coefs, time_scale, time_origin,     &
-                        rand_coefs) result(this)
+                        rand_coefs, rand_seed ) result(this)
     use set_constants, only : zero, one, two, pi, near_zero
     use combinatorics, only : nchoosek
 
@@ -4160,9 +4174,11 @@ contains
     real(dp), dimension(n_eq),            optional, intent(in) :: time_scale
     real(dp), dimension(n_eq),            optional, intent(in) :: time_origin
     logical,                              optional, intent(in) :: rand_coefs
+    integer,                              optional, intent(in) :: rand_seed
     type(cts_t)                                                :: this
     integer :: n, cnt
     integer :: total_degree, n_terms
+    integer, dimension(:), allocatable :: seed
 
     call this%destroy()
     call this%initialize_super(n_eq,n_dim)
@@ -4196,6 +4212,13 @@ contains
 
     if (present(rand_coefs) ) then
       call random_init(.true.,.false.)
+      if ( present(rand_seed) ) then
+        call random_seed( size=n )
+        allocate( seed(n) )
+        seed = rand_seed
+        call random_seed(put=seed)
+        deallocate(seed)
+      end if
       call random_number(this%a); this%a = two*this%a - one
       call random_number(this%b); this%b = two*this%b - one
       call random_number(this%c); this%c = two*this%c - one
@@ -4964,7 +4987,7 @@ module rec_block_derived_type
     procedure, public, pass :: eval => evaluate_block_rec
     procedure, public, pass :: set_cell_avgs => set_cell_avgs_fun
     procedure,         pass :: get_cell_h_ref
-    procedure,         pass :: init_cell_k, init_cell_v
+    procedure,         pass :: init_cell_k, init_cell_v, solve_cell_k
     procedure, public, pass :: init_cells
     procedure, public, pass :: get_cell_error, get_error_norm
     procedure,         pass :: get_cell_LHS_var, get_cell_RHS_var
@@ -5017,7 +5040,7 @@ contains
     end do
   end subroutine get_exterior_mask
 
-  function constructor( grid, block_num, n_dim, degree, n_var, n_skip, mask ) result(this)
+  function constructor( grid, block_num, n_dim, degree, n_var, n_skip, mask, sort_idx ) result(this)
     
     use math,              only : maximal_extents
     use index_conversion,  only : global2local_bnd
@@ -5028,6 +5051,7 @@ contains
     integer,               intent(in) :: block_num, n_dim, degree, n_var
     integer, dimension(3), intent(in) :: n_skip
     logical, dimension(:), optional, intent(in) :: mask
+    logical, optional, intent(in) :: sort_idx
     type(rec_block_t)                 :: this
     integer,  dimension(3)     :: idx_tmp, lo, hi
     real(dp), dimension(n_dim) :: h_ref
@@ -5061,9 +5085,10 @@ contains
     hi = 1
     hi(1:this%n_dim) = this%n_cells
 
-    max_degree = determine_maximum_degree(this,grid,block_num,min_sz)
+    ! max_degree = determine_maximum_degree(this,grid,block_num,min_sz)
 
-    call get_exterior_mask(lo(1:this%n_dim),hi(1:this%n_dim),lo(1:this%n_dim)+max_degree,hi(1:this%n_dim)-max_degree*0,mask_)
+    ! call get_exterior_mask(lo(1:this%n_dim),hi(1:this%n_dim),lo(1:this%n_dim)+max_degree,hi(1:this%n_dim)-max_degree*0,mask_)
+    mask_ = .true.
 
     idx_tmp = 1
     do i = 1,this%n_cells_total
@@ -5071,7 +5096,7 @@ contains
       h_ref = this%get_cell_h_ref( grid%gblock(block_num), idx_tmp )
       call this%get_nbors( grid, block_num, i, min_sz, mask_(i),               &
                            n_nbors, n_interior,                                &
-                           nbor_block, nbor_idx, nbor_face_id )
+                           nbor_block, nbor_idx, nbor_face_id, sort_idx=sort_idx )
       associate( quad => grid%gblock(block_num)%grid_vars%quad( idx_tmp(1),    &
                                                                 idx_tmp(2),    &
                                                                 idx_tmp(3) ) )
@@ -5107,12 +5132,13 @@ contains
     end do
   end subroutine k_exact_to_var
 
-  subroutine var_to_k_exact( this, grid, term_start, term_end, mask_k )
+  subroutine var_to_k_exact( this, grid, term_start, term_end, mask_k, sort_idx )
     use grid_derived_type, only : grid_type
     class(rec_block_t),    intent(inout) :: this
     type(grid_type),       intent(in)    :: grid
     integer,               intent(in)    :: term_start, term_end
     logical, dimension(:), intent(in)    :: mask_k
+    logical,   optional,   intent(in)    :: sort_idx
     integer :: i, m, n, min_sz, max_sz, n_nbors
     integer, dimension(:), allocatable :: nbor_block, nbor_idx
     real(dp), dimension(:,:), allocatable :: LHS
@@ -5123,7 +5149,7 @@ contains
 
     do i = 1,this%n_cells_total
       if (.not. mask_k(i)) cycle
-      call get_k_exact_nbors( this, grid, this%block_num, i, min_sz, n_nbors, nbor_block, nbor_idx )
+      call get_k_exact_nbors( this, grid, this%block_num, i, min_sz, n_nbors, nbor_block, nbor_idx, sort_idx=sort_idx )
       call this%cells(i)%var_to_k_exact( this%p, n_nbors, nbor_block, nbor_idx )
       m = n_nbors
       n = this%p%n_terms
@@ -5194,7 +5220,7 @@ contains
     deallocate( nodes )
   end function get_cell_h_ref
 
-  subroutine get_nbors( this, grid, blk, lin_idx, min_sz, variational, n_nbors, n_interior, nbor_block, nbor_idx, nbor_face_id )
+  subroutine get_nbors( this, grid, blk, lin_idx, min_sz, variational, n_nbors, n_interior, nbor_block, nbor_idx, nbor_face_id, sort_idx )
     use index_conversion,         only : global2local_bnd, local2global_bnd, cell_face_nbors
     use grid_derived_type,        only : grid_type
     class(rec_block_t),     intent(in)  :: this
@@ -5203,13 +5229,14 @@ contains
     logical,                intent(in)  :: variational
     integer,                intent(out) :: n_nbors, n_interior
     integer, dimension(6*min_sz), intent(out) :: nbor_block, nbor_idx, nbor_face_id
+    logical, optional, intent(in) :: sort_idx
     integer :: i
 
     nbor_face_id = 0
     n_interior   = 0
 
     if ( .not. variational ) then
-      call get_k_exact_nbors( this, grid, blk, lin_idx, min_sz, n_nbors, nbor_block, nbor_idx )
+      call get_k_exact_nbors( this, grid, blk, lin_idx, min_sz, n_nbors, nbor_block, nbor_idx, sort_idx=sort_idx )
     else
       n_nbors    = 2*this%n_dim
       n_interior = 0
@@ -5337,6 +5364,53 @@ contains
     call compute_pseudo_inverse( m, n, LHS(1:m,1:n), this%cells(i)%Ainv(1:n,1:m) )
   end subroutine init_cell_k
 
+  ! subroutine init_cells( this, grid, term_start, term_end, n_var, var_idx )
+  !   use grid_derived_type, only : grid_type 
+  !   use string_stuff,      only : progress_line
+  !   class(rec_block_t),     intent(inout) :: this
+  !   type(grid_type),        intent(in)    :: grid
+  !   integer,                intent(in)    :: term_start, term_end, n_var
+  !   integer, dimension(:),  intent(in)    :: var_idx
+  !   integer :: i, cnt, n_v, n_k, n, m
+  !   real(dp), dimension(:,:), allocatable :: LHS
+  !   n_v = 0
+  !   n_k = 0
+  !   do i = 1,this%n_cells_total
+  !     if ( this%cells(i)%variational ) then
+  !       n_v = n_v + 1
+  !     else
+  !       n_k = n_k + 1
+  !     end if
+  !   end do
+
+  !   if ( n_k > 0 ) then
+  !     m = maxval(this%cells%n_nbor)
+  !     n = this%p%n_terms
+  !     allocate( LHS(m,n) )
+  !     cnt = 0
+  !     do i = 1,this%n_cells_total
+  !       if ( this%cells(i)%variational ) cycle
+  !       cnt = cnt + 1
+  !       call progress_line('initializing k-exact cell ',cnt,n_k)
+  !       call this%init_cell_k( LHS, i, term_end )
+  !     end do
+  !     deallocate( LHS )
+  !     write(*,*)
+  !   end if
+
+  !   if ( n_v > 0 ) then
+  !     cnt = 0
+  !     do i = 1,this%n_cells_total
+  !       if ( .not. this%cells(i)%variational ) cycle
+  !       cnt = cnt + 1
+  !       call progress_line('initializing var-rec cell ',cnt,n_v)
+  !       call this%init_cell_v( i, grid, term_start, term_end, n_var, var_idx )
+  !     end do
+  !     write(*,*)
+  !   end if
+  ! end subroutine init_cells
+
+
   subroutine init_cells( this, grid, term_start, term_end, n_var, var_idx )
     use grid_derived_type, only : grid_type 
     use string_stuff,      only : progress_line
@@ -5346,6 +5420,11 @@ contains
     integer, dimension(:),  intent(in)    :: var_idx
     integer :: i, cnt, n_v, n_k, n, m
     real(dp), dimension(:,:), allocatable :: LHS
+
+    m = maxval(this%cells%n_nbor)
+    n = this%p%n_terms
+    allocate( LHS(m,n) )
+
     n_v = 0
     n_k = 0
     do i = 1,this%n_cells_total
@@ -5356,10 +5435,9 @@ contains
       end if
     end do
 
+    
+
     if ( n_k > 0 ) then
-      m = maxval(this%cells%n_nbor)
-      n = this%p%n_terms
-      allocate( LHS(m,n) )
       cnt = 0
       do i = 1,this%n_cells_total
         if ( this%cells(i)%variational ) cycle
@@ -5367,7 +5445,6 @@ contains
         call progress_line('initializing k-exact cell ',cnt,n_k)
         call this%init_cell_k( LHS, i, term_end )
       end do
-      deallocate( LHS )
       write(*,*)
     end if
 
@@ -5377,10 +5454,15 @@ contains
         if ( .not. this%cells(i)%variational ) cycle
         cnt = cnt + 1
         call progress_line('initializing var-rec cell ',cnt,n_v)
+        call this%init_cell_k( LHS, i, term_end )
+        call this%solve_cell_k(i,term_end,n_var,var_idx)
+        call this%cells(i)%k_exact_to_var(this%p, this%n_cells )
         call this%init_cell_v( i, grid, term_start, term_end, n_var, var_idx )
       end do
       write(*,*)
     end if
+
+    deallocate( LHS )
   end subroutine init_cells
 
 
@@ -5426,7 +5508,7 @@ contains
       end do
     end function
 
-    pure subroutine get_k_exact_nbors( this, grid, blk, lin_idx, min_sz, n_nbors, nbor_block, nbor_idx )
+    pure subroutine get_k_exact_nbors( this, grid, blk, lin_idx, min_sz, n_nbors, nbor_block, nbor_idx, sort_idx )
       use index_conversion,  only : global2local_bnd, local2global_bnd
       use stencil_growing_routines, only : grow_stencil_basic
       use grid_derived_type, only : grid_type
@@ -5435,25 +5517,15 @@ contains
       integer,                intent(in)  :: blk, lin_idx, min_sz
       integer,                intent(out) :: n_nbors
       integer, dimension(6*min_sz), intent(out) :: nbor_block, nbor_idx
-      integer, dimension(6*min_sz,4) :: idx_list
+      logical, optional, intent(in)       :: sort_idx
       integer, dimension(3) :: idx_tmp, lo, hi
-      integer :: i
-      nbor_block = 0
-      nbor_idx   = 0
-
       lo = 1
       hi = 1
       hi(1:this%n_dim) = this%n_cells
       idx_tmp = 1
       idx_tmp(1:this%n_dim) = global2local_bnd( lin_idx, lo(1:this%n_dim), hi(1:this%n_dim) )
-      
-      call grow_stencil_basic( blk, idx_tmp, hi, min_sz, n_nbors, idx_list )
+      call grow_stencil_basic( blk, idx_tmp, hi, min_sz, n_nbors, nbor_block, nbor_idx, sort_idx=sort_idx )
       n_nbors = n_nbors - 1 ! don't include the central cell
-      do i = 1, n_nbors
-        nbor_block(i) = idx_list(i+1,1)
-        nbor_idx(i) = local2global_bnd( idx_list(i+1,2:4),lo,hi)
-      end do
-
     end subroutine get_k_exact_nbors
 
     pure subroutine get_cell_LHS_k( this, lin_idx, term_end, LHS_m, LHS_n, LHS, scale, col_scale )
@@ -5513,26 +5585,56 @@ contains
     end do
   end subroutine get_cell_RHS_k
 
+  pure subroutine solve_cell_k( this, lin_idx, term_end, n_var, var_idx )
+    use set_constants, only : zero
+    class(rec_block_t), intent(inout) :: this
+    integer,                intent(in)    :: lin_idx, term_end, n_var
+    integer, dimension(:),  intent(in)    :: var_idx
+    real(dp), dimension(:,:), allocatable :: RHS
+    integer :: i, n, max_nbors, n_nbors, v
+    i = lin_idx
+    max_nbors = maxval(this%cells%n_nbor)
+    allocate( RHS(this%cells(i)%n_nbor,n_var) )
+    call this%get_cell_RHS_k(i,n_var,var_idx,n_nbors,RHS)
+    do v = 1,n_var
+      do n = 2,term_end
+        this%cells(i)%coefs(n,var_idx(v)) = this%cells(i)%col_scale(n-1)*dot_product( this%cells(i)%Ainv(n-1,:),RHS(1:n_nbors,v) )
+      end do
+    end do
+    deallocate( RHS )
+  end subroutine solve_cell_k
+
   pure subroutine solve_k_exact_block( this, term_end, n_var, var_idx )
     use set_constants, only : zero
     class(rec_block_t), intent(inout) :: this
     integer,                intent(in)    :: term_end, n_var
     integer, dimension(:),  intent(in)    :: var_idx
-    real(dp), dimension(:,:), allocatable :: RHS
-    integer :: i, n, max_nbors, n_nbors, v
-    max_nbors = maxval(this%cells%n_nbor)
-    allocate( RHS(max_nbors,n_var) )
+    integer :: i, n, v
     do i = 1,this%n_cells_total
       if ( this%cells(i)%variational ) cycle
-      call this%get_cell_RHS_k(i,n_var,var_idx,n_nbors,RHS)
-      do v = 1,n_var
-        do n = 2,term_end
-          this%cells(i)%coefs(n,var_idx(v)) = this%cells(i)%col_scale(n-1)*dot_product( this%cells(i)%Ainv(n-1,:),RHS(1:n_nbors,v) )
-        end do
-      end do
+      call this%solve_cell_k( i, term_end, n_var, var_idx )
     end do
-    deallocate( RHS )
   end subroutine solve_k_exact_block
+  ! pure subroutine solve_k_exact_block( this, term_end, n_var, var_idx )
+  !   use set_constants, only : zero
+  !   class(rec_block_t), intent(inout) :: this
+  !   integer,                intent(in)    :: term_end, n_var
+  !   integer, dimension(:),  intent(in)    :: var_idx
+  !   real(dp), dimension(:,:), allocatable :: RHS
+  !   integer :: i, n, max_nbors, n_nbors, v
+  !   max_nbors = maxval(this%cells%n_nbor)
+  !   allocate( RHS(max_nbors,n_var) )
+  !   do i = 1,this%n_cells_total
+  !     if ( this%cells(i)%variational ) cycle
+  !     call this%get_cell_RHS_k(i,n_var,var_idx,n_nbors,RHS)
+  !     do v = 1,n_var
+  !       do n = 2,term_end
+  !         this%cells(i)%coefs(n,var_idx(v)) = this%cells(i)%col_scale(n-1)*dot_product( this%cells(i)%Ainv(n-1,:),RHS(1:n_nbors,v) )
+  !       end do
+  !     end do
+  !   end do
+  !   deallocate( RHS )
+  ! end subroutine solve_k_exact_block
 
 !!!!!!!!!!!!!!!!!!!!
 ! variational specific
@@ -5827,7 +5929,7 @@ contains
     this%degree   = 0
   end subroutine destroy_rec_t
 
-  function constructor( grid, n_dim, degree, n_vars, n_skip, ext_fun ) result(this)
+  function constructor( grid, n_dim, degree, n_vars, n_skip, ext_fun, sort_idx ) result(this)
     use grid_derived_type,      only : grid_type
     use rec_block_derived_type, only : rec_block_t
     use function_holder_type,   only : func_h_t
@@ -5835,6 +5937,7 @@ contains
     integer,                             intent(in) :: n_dim, degree, n_vars
     integer, dimension(:),     optional, intent(in) :: n_skip
     class(func_h_t), optional,           intent(in) :: ext_fun
+    logical, optional,                   intent(in) :: sort_idx
     type(rec_t) :: this
     integer, dimension(3) :: n_skip_
     integer :: i, n
@@ -5851,7 +5954,7 @@ contains
 
     allocate( this%b(this%n_blocks) )
     do i = 1,this%n_blocks
-      this%b(i) = rec_block_t( grid, i, n_dim, degree, n_vars, n_skip_ )
+      this%b(i) = rec_block_t( grid, i, n_dim, degree, n_vars, n_skip_, sort_idx=sort_idx )
     end do
 
     if ( present(ext_fun) ) then
@@ -5904,6 +6007,7 @@ contains
     logical :: converged, old
 
     old = .false.
+    converged = .true.
 
     quad_order = 1
     if (present(output_quad_order)) quad_order = output_quad_order
@@ -5939,11 +6043,13 @@ contains
         call this%b(blk)%init_cells( grid, term_start, term_end,               &
                                      n_vars, [(n,n=1,n_vars)] )
         call this%b(blk)%solve_k( term_end, n_vars, [(n,n=1,n_vars)] )
-        call this%b(blk)%solve_v( term_start, term_end, n_vars, [(n,n=1,n_vars)],&
+        if ( any( this%b(blk)%cells%variational ) ) then
+          call this%b(blk)%solve_v( term_start, term_end, n_vars, [(n,n=1,n_vars)],&
                                 omega=omega, tol=tol, n_iter=n_iter,           &
                                 converged=converged)
-        write(*,*)
-        write(*,'(A,I0,A,L1)') 'Block ', blk, ': converged =', converged
+          write(*,*)
+          write(*,'(A,I0,A,L1)') 'Block ', blk, ': converged =', converged
+        end if
         if ( present(ext_fun) ) then
           error_norms = this%b(blk)%get_error_norm( grid%gblock(blk),         &
                                                     [(n,n=1,n_vars)],         &
@@ -6300,7 +6406,7 @@ contains
     call grid%gblock(1)%grid_vars%setup( grid%gblock(1) )
   end subroutine setup_grid_generate
 
-  subroutine setup_reconstruction1( grid, n_dim, n_vars, degree, rec, eval_fun )
+  subroutine setup_reconstruction1( grid, n_dim, n_vars, degree, rec, eval_fun, sort_idx )
     use grid_derived_type,    only : grid_type
     use rec_derived_type,     only : rec_t
     use function_holder_type, only : func_h_t
@@ -6308,8 +6414,9 @@ contains
     integer,                   intent(in)  :: n_dim, n_vars, degree
     type(rec_t),               intent(out) :: rec
     class(func_h_t), optional, intent(in)  :: eval_fun
+    logical,         optional, intent(in)  :: sort_idx
 
-    rec = rec_t( grid, n_dim, degree, n_vars, ext_fun=eval_fun )
+    rec = rec_t( grid, n_dim, degree, n_vars, ext_fun=eval_fun, sort_idx=sort_idx )
   end subroutine setup_reconstruction1
 
 end module test_problem
@@ -6337,10 +6444,10 @@ program main
   real(dp), dimension(:,:), allocatable :: space_scale, space_origin
   integer :: i
 
-  degree  = 4
+  degree  = 3
   n_vars  = 1
   n_dim   = 2
-  n_nodes = [33,33,1]
+  n_nodes = [5,5,1]
   n_ghost = [0,0,0]
   n_skip  = [1,1,1]
   old = .false.
@@ -6350,15 +6457,19 @@ program main
   space_scale = 0.2_dp
   space_origin = 0.0_dp
   space_origin(1:n_dim,1) = 0.5_dp
-  allocate( eval_fun, source=cts_t(n_dim,n_vars,rand_coefs=.true.,space_scale=space_scale, space_origin=space_origin) )
+  allocate( eval_fun, source=cts_t( n_dim, n_vars,     &
+                                    rand_coefs=.true., &
+                                    rand_seed=2,       &
+                                    space_scale=space_scale, &
+                                    space_origin=space_origin) )
 
   
   call setup_grid( n_dim, n_nodes, n_ghost, grid, delta=0.3_dp )!, x2_map=geom_space_wrapper )
 
   call timer%tic()
-  call setup_reconstruction1( grid, n_dim, n_vars, degree, rec, eval_fun=eval_fun )
-  call rec%solve( grid,ext_fun=eval_fun,ramp=.true.,tol=1.0e-10_dp,n_iter=1000,soln_name='test',output_quad_order=12)
-  ! call rec%solve( grid,ext_fun=eval_fun,ramp=.true.,tol=1.0e-10_dp,n_iter=1000)
+  call setup_reconstruction1( grid, n_dim, n_vars, degree, rec, eval_fun=eval_fun, sort_idx=.true. )
+  ! call rec%solve( grid,ext_fun=eval_fun,ramp=.true.,tol=1.0e-10_dp,n_iter=1000,soln_name='test',output_quad_order=12)
+  call rec%solve( grid,ext_fun=eval_fun,ramp=.true.,tol=1.0e-10_dp,n_iter=1000)
   write(*,*) 'Elapsed time: ', timer%toc()
   
   call rec%destroy()
