@@ -1139,7 +1139,7 @@ module stencil_growing_routines
 
   contains
 
-  pure subroutine grow_stencil_basic( block_id, idx, N_cells, sz_in, sz_out, nbor_block, nbor_idx, sort_idx )
+  pure subroutine grow_stencil_basic( block_id, idx, N_cells, sz_in, sz_out, nbor_block, nbor_idx )
     use stencil_cell_derived_type, only : block_info
     use index_conversion,          only : local2global_bnd
     use stencil_indexing,          only : sort_stencil_idx
@@ -1148,7 +1148,7 @@ module stencil_growing_routines
     integer,                              intent(in)  :: sz_in
     integer,                              intent(out) :: sz_out
     integer, dimension(6*sz_in),          intent(out) :: nbor_block, nbor_idx
-    logical, optional,                    intent(in)  :: sort_idx
+    ! logical, optional,                    intent(in)  :: sort_idx
     type(block_info), dimension(1) :: bi
     integer, dimension(4,6*sz_in) :: idx_list
     integer :: i
@@ -1156,9 +1156,9 @@ module stencil_growing_routines
     call grow_stencil_new_connected_block( block_id, idx, bi, sz_in, sz_out, idx_list )
     call bi%destroy()
 
-    if ( present(sort_idx) ) then
-      if ( sort_idx ) call sort_stencil_idx(sz_out,idx_list)
-    end if
+    ! if ( present(sort_idx) ) then
+    !   if ( sort_idx ) call sort_stencil_idx(sz_out,idx_list)
+    ! end if
 
     nbor_block = 0
     nbor_idx   = 0
@@ -4324,7 +4324,7 @@ module zero_mean_basis_derived_type
     procedure, nopass       :: length_scale  => get_length_scale_vector
     procedure, public, pass :: eval  => evaluate_basis
     procedure, public, pass :: deval => evaluate_basis_derivative
-    procedure, public, pass :: scaled_basis_derivative
+    procedure, public, pass :: scaled_basis_derivative, scaled_weighted_basis_derivative
     procedure, public, pass :: scaled_basis_derivatives
     procedure, public, pass :: destroy => destroy_zero_mean_basis_t
 
@@ -4536,28 +4536,83 @@ pure function scaled_basis_derivative( this, p, term_idx, diff_idx,            &
   derivative = derivative * L
 end function scaled_basis_derivative
 
+pure function scaled_weighted_basis_derivative( this, p, term_idx, diff_idx,            &
+                                       point, scale, weights ) result(derivative)
+  class(zero_mean_basis_t), intent(in) :: this
+  type(monomial_basis_t),   intent(in) :: p
+  integer,                  intent(in) :: term_idx, diff_idx
+  real(dp), dimension(:),   intent(in) :: point
+  real(dp), dimension(:),   intent(in) :: scale
+  real(dp), dimension(0:p%total_degree), intent(in) :: weights
+  real(dp)                             :: derivative
+  real(dp) :: L
+  derivative = this%deval( p, term_idx, point, p%exponents(:,diff_idx) )
+  L = this%length_scale( p%exponents(:,diff_idx), scale )
+  derivative = derivative * L * weights( sum( p%exponents(:,diff_idx) ) )
+end function scaled_weighted_basis_derivative
+
+! pure function scaled_basis_derivatives( this, p, term_start, term_end,         &
+!                                         point, scale ) result(derivatives)
+!   use set_constants, only : zero
+!   class(zero_mean_basis_t),                 intent(in) :: this
+!   type(monomial_basis_t),                   intent(in) :: p
+!   integer,                                  intent(in) :: term_start, term_end
+!   real(dp), dimension(:),                   intent(in) :: point
+!   real(dp), dimension(:),                   intent(in) :: scale
+!   real(dp), dimension(term_end, term_end - term_start) :: derivatives
+!   integer :: i, j
+!   derivatives = zero
+!   ! outer loop over basis functions
+!   do j = term_start+1,term_end
+!     ! inner loop over derivatives
+!     do i = 1,j
+!       derivatives(i,j-term_start) = this%scaled_basis_derivative( p,           &
+!                                                                   j,           &
+!                                                                   i,           &
+!                                                                   point,       &
+!                                                                   scale )
+!     end do
+!   end do
+! end function scaled_basis_derivatives
+
 pure function scaled_basis_derivatives( this, p, term_start, term_end,         &
-                                        point, scale ) result(derivatives)
+                                        point, scale, weights ) result(derivatives)
   use set_constants, only : zero
   class(zero_mean_basis_t),                 intent(in) :: this
   type(monomial_basis_t),                   intent(in) :: p
   integer,                                  intent(in) :: term_start, term_end
   real(dp), dimension(:),                   intent(in) :: point
   real(dp), dimension(:),                   intent(in) :: scale
+  real(dp), dimension(0:p%total_degree), optional, intent(in) :: weights
   real(dp), dimension(term_end, term_end - term_start) :: derivatives
   integer :: i, j
   derivatives = zero
-  ! outer loop over basis functions
-  do j = term_start+1,term_end
-    ! inner loop over derivatives
-    do i = 1,j
-      derivatives(i,j-term_start) = this%scaled_basis_derivative( p,           &
-                                                                  j,           &
-                                                                  i,           &
-                                                                  point,       &
-                                                                  scale )
+  if ( present(weights) ) then
+    ! outer loop over basis functions
+    do j = term_start+1,term_end
+      ! inner loop over derivatives
+      do i = 1,j
+        derivatives(i,j-term_start) = this%scaled_weighted_basis_derivative( p,  &
+                                                                    j,           &
+                                                                    i,           &
+                                                                    point,       &
+                                                                    scale,       &
+                                                                    weights )
+      end do
     end do
-  end do
+  else
+    ! outer loop over basis functions
+    do j = term_start+1,term_end
+      ! inner loop over derivatives
+      do i = 1,j
+        derivatives(i,j-term_start) = this%scaled_basis_derivative( p,           &
+                                                                    j,           &
+                                                                    i,           &
+                                                                    point,       &
+                                                                    scale )
+      end do
+    end do
+  end if
 end function scaled_basis_derivatives
 
 end module zero_mean_basis_derived_type
@@ -4864,7 +4919,7 @@ contains
 ! var-rec specific routines
 !!!!!!!!!!!!!!!!!!!!!
   pure subroutine get_nbor_contribution( this, nbor, p, fquad,                 &
-                                         term_start, term_end, A, B, D, C )
+                                         term_start, term_end, A, B, D, C, weights )
     use set_constants, only : zero, one
     use quadrature_derived_type,      only : quad_t
     use monomial_basis_derived_type,  only : monomial_basis_t
@@ -4878,6 +4933,7 @@ contains
                          term_end - term_start ), intent(out) :: A, B
     real(dp), dimension( term_end - term_start,                                &
                                     term_start ), intent(out) :: D, C
+    real(dp), dimension(0:p%total_degree), optional, intent(in)  :: weights
     real(dp), dimension(term_end,term_end) :: d_basis_i
     real(dp), dimension(term_end,term_end) :: d_basis_j
     integer :: q, l, m
@@ -4891,12 +4947,12 @@ contains
                                                        0,                      &
                                                        term_end,               &
                                                        fquad%quad_pts(:,q),    &
-                                                       dij )
+                                                       dij, weights=weights )
       d_basis_j = nbor%basis%scaled_basis_derivatives( p,                      &
                                                        0,                      &
                                                        term_end,               &
                                                        fquad%quad_pts(:,q),    &
-                                                       dij )
+                                                       dij, weights=weights )
       ! LHS
       do m = 1,term_end-term_start
         do l = 1,term_end-term_start
@@ -5040,8 +5096,7 @@ contains
     end do
   end subroutine get_exterior_mask
 
-  function constructor( grid, block_num, n_dim, degree, n_var, n_skip, mask, sort_idx ) result(this)
-    
+  function constructor( grid, block_num, n_dim, degree, n_var, n_skip, mask, weights ) result(this)
     use math,              only : maximal_extents
     use index_conversion,  only : global2local_bnd
     use grid_derived_type, only : grid_type
@@ -5051,7 +5106,7 @@ contains
     integer,               intent(in) :: block_num, n_dim, degree, n_var
     integer, dimension(3), intent(in) :: n_skip
     logical, dimension(:), optional, intent(in) :: mask
-    logical, optional, intent(in) :: sort_idx
+    real(dp), dimension(0:degree), optional, intent(in) :: weights
     type(rec_block_t)                 :: this
     integer,  dimension(3)     :: idx_tmp, lo, hi
     real(dp), dimension(n_dim) :: h_ref
@@ -5096,7 +5151,7 @@ contains
       h_ref = this%get_cell_h_ref( grid%gblock(block_num), idx_tmp )
       call this%get_nbors( grid, block_num, i, min_sz, mask_(i),               &
                            n_nbors, n_interior,                                &
-                           nbor_block, nbor_idx, nbor_face_id, sort_idx=sort_idx )
+                           nbor_block, nbor_idx, nbor_face_id )
       associate( quad => grid%gblock(block_num)%grid_vars%quad( idx_tmp(1),    &
                                                                 idx_tmp(2),    &
                                                                 idx_tmp(3) ) )
@@ -5117,28 +5172,28 @@ contains
     deallocate( nbor_block, nbor_idx, nbor_face_id )
   end function constructor
 
-  subroutine k_exact_to_var( this, grid, term_start, term_end, mask_v )
+  subroutine k_exact_to_var( this, grid, term_start, term_end, mask_v, weights )
     use grid_derived_type, only : grid_type
     class(rec_block_t),    intent(inout) :: this
     type(grid_type),       intent(in)    :: grid
     integer,               intent(in)    :: term_start, term_end
     logical, dimension(:), intent(in)    :: mask_v
+    real(dp), dimension(0:this%p%total_degree), optional, intent(in) :: weights
     integer :: i, j
 
     do i = 1,this%n_cells_total
       if (.not. mask_v(i)) cycle
       call this%cells(i)%k_exact_to_var( this%p, grid%gblock(this%block_num)%n_cells )
-      call this%init_cell_v( i, grid, term_start, term_end, this%cells(i)%n_vars, [(j,j=1,this%cells(i)%n_vars)] )
+      call this%init_cell_v( i, grid, term_start, term_end, this%cells(i)%n_vars, [(j,j=1,this%cells(i)%n_vars)], weights=weights )
     end do
   end subroutine k_exact_to_var
 
-  subroutine var_to_k_exact( this, grid, term_start, term_end, mask_k, sort_idx )
+  subroutine var_to_k_exact( this, grid, term_start, term_end, mask_k )
     use grid_derived_type, only : grid_type
     class(rec_block_t),    intent(inout) :: this
     type(grid_type),       intent(in)    :: grid
     integer,               intent(in)    :: term_start, term_end
     logical, dimension(:), intent(in)    :: mask_k
-    logical,   optional,   intent(in)    :: sort_idx
     integer :: i, m, n, min_sz, max_sz, n_nbors
     integer, dimension(:), allocatable :: nbor_block, nbor_idx
     real(dp), dimension(:,:), allocatable :: LHS
@@ -5149,7 +5204,7 @@ contains
 
     do i = 1,this%n_cells_total
       if (.not. mask_k(i)) cycle
-      call get_k_exact_nbors( this, grid, this%block_num, i, min_sz, n_nbors, nbor_block, nbor_idx, sort_idx=sort_idx )
+      call get_k_exact_nbors( this, grid, this%block_num, i, min_sz, n_nbors, nbor_block, nbor_idx )
       call this%cells(i)%var_to_k_exact( this%p, n_nbors, nbor_block, nbor_idx )
       m = n_nbors
       n = this%p%n_terms
@@ -5220,7 +5275,7 @@ contains
     deallocate( nodes )
   end function get_cell_h_ref
 
-  subroutine get_nbors( this, grid, blk, lin_idx, min_sz, variational, n_nbors, n_interior, nbor_block, nbor_idx, nbor_face_id, sort_idx )
+  subroutine get_nbors( this, grid, blk, lin_idx, min_sz, variational, n_nbors, n_interior, nbor_block, nbor_idx, nbor_face_id )
     use index_conversion,         only : global2local_bnd, local2global_bnd, cell_face_nbors
     use grid_derived_type,        only : grid_type
     class(rec_block_t),     intent(in)  :: this
@@ -5229,21 +5284,20 @@ contains
     logical,                intent(in)  :: variational
     integer,                intent(out) :: n_nbors, n_interior
     integer, dimension(6*min_sz), intent(out) :: nbor_block, nbor_idx, nbor_face_id
-    logical, optional, intent(in) :: sort_idx
     integer :: i
 
     nbor_face_id = 0
     n_interior   = 0
 
     if ( .not. variational ) then
-      call get_k_exact_nbors( this, grid, blk, lin_idx, min_sz, n_nbors, nbor_block, nbor_idx, sort_idx=sort_idx )
+      call get_k_exact_nbors( this, grid, blk, lin_idx, min_sz, n_nbors, nbor_block, nbor_idx )
     else
       n_nbors    = 2*this%n_dim
       n_interior = 0
       call cell_face_nbors( this%n_dim, lin_idx, [(1,i=1,this%n_dim)], this%n_cells(1:this%n_dim),               &
                             nbor_idx, nbor_face_id, n_interior )
     end if
-    end subroutine get_nbors
+  end subroutine get_nbors
 
   pure function get_cell_error( this, quad, lin_idx, n_terms, norm,            &
                                 n_var, var_idx, eval_fun ) result(err)
@@ -5336,16 +5390,17 @@ contains
     end do
   end function get_error_norm
 
-  subroutine init_cell_v( this, lin_idx, grid, term_start, term_end, n_var, var_idx )
+  subroutine init_cell_v( this, lin_idx, grid, term_start, term_end, n_var, var_idx, weights )
     use grid_derived_type, only : grid_type
     class(rec_block_t),       intent(inout) :: this
     integer,                  intent(in)    :: lin_idx
     type(grid_type),          intent(in)    :: grid
     integer,                  intent(in)    :: term_start, term_end, n_var
     integer, dimension(:),    intent(in)    :: var_idx
+    real(dp), dimension(0:this%p%total_degree), optional, intent(in) :: weights
     integer :: i, n, m
     i = lin_idx
-    call this%get_cell_LHS_var( grid, i, term_start, term_end )
+    call this%get_cell_LHS_var( grid, i, term_start, term_end, weights=weights )
     this%cells(i)%RHS = this%get_cell_RHS_var( i, term_start, term_end,     &
                                                   n_var, var_idx )
   end subroutine init_cell_v
@@ -5364,60 +5419,14 @@ contains
     call compute_pseudo_inverse( m, n, LHS(1:m,1:n), this%cells(i)%Ainv(1:n,1:m) )
   end subroutine init_cell_k
 
-  ! subroutine init_cells( this, grid, term_start, term_end, n_var, var_idx )
-  !   use grid_derived_type, only : grid_type 
-  !   use string_stuff,      only : progress_line
-  !   class(rec_block_t),     intent(inout) :: this
-  !   type(grid_type),        intent(in)    :: grid
-  !   integer,                intent(in)    :: term_start, term_end, n_var
-  !   integer, dimension(:),  intent(in)    :: var_idx
-  !   integer :: i, cnt, n_v, n_k, n, m
-  !   real(dp), dimension(:,:), allocatable :: LHS
-  !   n_v = 0
-  !   n_k = 0
-  !   do i = 1,this%n_cells_total
-  !     if ( this%cells(i)%variational ) then
-  !       n_v = n_v + 1
-  !     else
-  !       n_k = n_k + 1
-  !     end if
-  !   end do
-
-  !   if ( n_k > 0 ) then
-  !     m = maxval(this%cells%n_nbor)
-  !     n = this%p%n_terms
-  !     allocate( LHS(m,n) )
-  !     cnt = 0
-  !     do i = 1,this%n_cells_total
-  !       if ( this%cells(i)%variational ) cycle
-  !       cnt = cnt + 1
-  !       call progress_line('initializing k-exact cell ',cnt,n_k)
-  !       call this%init_cell_k( LHS, i, term_end )
-  !     end do
-  !     deallocate( LHS )
-  !     write(*,*)
-  !   end if
-
-  !   if ( n_v > 0 ) then
-  !     cnt = 0
-  !     do i = 1,this%n_cells_total
-  !       if ( .not. this%cells(i)%variational ) cycle
-  !       cnt = cnt + 1
-  !       call progress_line('initializing var-rec cell ',cnt,n_v)
-  !       call this%init_cell_v( i, grid, term_start, term_end, n_var, var_idx )
-  !     end do
-  !     write(*,*)
-  !   end if
-  ! end subroutine init_cells
-
-
-  subroutine init_cells( this, grid, term_start, term_end, n_var, var_idx )
+  subroutine init_cells( this, grid, term_start, term_end, n_var, var_idx, weights )
     use grid_derived_type, only : grid_type 
     use string_stuff,      only : progress_line
     class(rec_block_t),     intent(inout) :: this
     type(grid_type),        intent(in)    :: grid
     integer,                intent(in)    :: term_start, term_end, n_var
     integer, dimension(:),  intent(in)    :: var_idx
+    real(dp), dimension(0:this%p%total_degree), optional, intent(in) :: weights
     integer :: i, cnt, n_v, n_k, n, m
     real(dp), dimension(:,:), allocatable :: LHS
 
@@ -5434,8 +5443,6 @@ contains
         n_k = n_k + 1
       end if
     end do
-
-    
 
     if ( n_k > 0 ) then
       cnt = 0
@@ -5454,10 +5461,10 @@ contains
         if ( .not. this%cells(i)%variational ) cycle
         cnt = cnt + 1
         call progress_line('initializing var-rec cell ',cnt,n_v)
-        call this%init_cell_k( LHS, i, term_end )
-        call this%solve_cell_k(i,term_end,n_var,var_idx)
-        call this%cells(i)%k_exact_to_var(this%p, this%n_cells )
-        call this%init_cell_v( i, grid, term_start, term_end, n_var, var_idx )
+        ! call this%init_cell_k( LHS, i, term_end )
+        ! call this%solve_cell_k(i,term_end,n_var,var_idx)
+        ! call this%cells(i)%k_exact_to_var(this%p, this%n_cells )
+        call this%init_cell_v( i, grid, term_start, term_end, n_var, var_idx, weights=weights )
       end do
       write(*,*)
     end if
@@ -5506,9 +5513,9 @@ contains
         idx_tmp(1:this%n_dim) = global2local_bnd( i, lo(1:this%n_dim), hi(1:this%n_dim) )
         max_degree = max(max_degree,get_max_degree(blk,idx_tmp,hi,min_sz))
       end do
-    end function
+    end function determine_maximum_degree
 
-    pure subroutine get_k_exact_nbors( this, grid, blk, lin_idx, min_sz, n_nbors, nbor_block, nbor_idx, sort_idx )
+    pure subroutine get_k_exact_nbors( this, grid, blk, lin_idx, min_sz, n_nbors, nbor_block, nbor_idx )
       use index_conversion,  only : global2local_bnd, local2global_bnd
       use stencil_growing_routines, only : grow_stencil_basic
       use grid_derived_type, only : grid_type
@@ -5517,14 +5524,13 @@ contains
       integer,                intent(in)  :: blk, lin_idx, min_sz
       integer,                intent(out) :: n_nbors
       integer, dimension(6*min_sz), intent(out) :: nbor_block, nbor_idx
-      logical, optional, intent(in)       :: sort_idx
       integer, dimension(3) :: idx_tmp, lo, hi
       lo = 1
       hi = 1
       hi(1:this%n_dim) = this%n_cells
       idx_tmp = 1
       idx_tmp(1:this%n_dim) = global2local_bnd( lin_idx, lo(1:this%n_dim), hi(1:this%n_dim) )
-      call grow_stencil_basic( blk, idx_tmp, hi, min_sz, n_nbors, nbor_block, nbor_idx, sort_idx=sort_idx )
+      call grow_stencil_basic( blk, idx_tmp, hi, min_sz, n_nbors, nbor_block, nbor_idx )
       n_nbors = n_nbors - 1 ! don't include the central cell
     end subroutine get_k_exact_nbors
 
@@ -5641,7 +5647,7 @@ contains
 !!!!!!!!!!!!!!!!!!!!
   
 
-  subroutine get_cell_LHS_var( this, grid, lin_idx, term_start, term_end )
+  subroutine get_cell_LHS_var( this, grid, lin_idx, term_start, term_end, weights )
     use set_constants,           only : zero
     use index_conversion,        only : get_face_idx_from_id, global2local_bnd
     use math,                    only : LUdecomp
@@ -5651,6 +5657,7 @@ contains
     class(rec_block_t), intent(inout) :: this
     type(grid_type),    intent(in)    :: grid
     integer,            intent(in)    :: lin_idx, term_start, term_end
+    real(dp), dimension(0:this%p%total_degree), optional, intent(in) :: weights
     real(dp), dimension(term_end - term_start, term_end - term_start ) :: dA
     real(dp), dimension(term_end - term_start,            term_start ) :: dD
     integer, dimension(3) :: lo, hi, idx, face_idx
@@ -5687,7 +5694,8 @@ contains
                                                 dA,                            &
                                                 this%cells(i)%B(1:m,1:m,jj),   &
                                                 dD,                            &
-                                                this%cells(i)%C(1:m,1:n,jj) )
+                                                this%cells(i)%C(1:m,1:n,jj),   &
+                                                weights=weights )
       end associate
       this%cells(i)%A(1:m,1:m) = this%cells(i)%A(1:m,1:m) + dA
       this%cells(i)%D(1:m,1:n) = this%cells(i)%D(1:m,1:n) + dD
@@ -5929,7 +5937,7 @@ contains
     this%degree   = 0
   end subroutine destroy_rec_t
 
-  function constructor( grid, n_dim, degree, n_vars, n_skip, ext_fun, sort_idx ) result(this)
+  function constructor( grid, n_dim, degree, n_vars, n_skip, ext_fun, weights ) result(this)
     use grid_derived_type,      only : grid_type
     use rec_block_derived_type, only : rec_block_t
     use function_holder_type,   only : func_h_t
@@ -5937,7 +5945,7 @@ contains
     integer,                             intent(in) :: n_dim, degree, n_vars
     integer, dimension(:),     optional, intent(in) :: n_skip
     class(func_h_t), optional,           intent(in) :: ext_fun
-    logical, optional,                   intent(in) :: sort_idx
+    real(dp), dimension(0:degree), optional, intent(in) :: weights
     type(rec_t) :: this
     integer, dimension(3) :: n_skip_
     integer :: i, n
@@ -5954,7 +5962,7 @@ contains
 
     allocate( this%b(this%n_blocks) )
     do i = 1,this%n_blocks
-      this%b(i) = rec_block_t( grid, i, n_dim, degree, n_vars, n_skip_, sort_idx=sort_idx )
+      this%b(i) = rec_block_t( grid, i, n_dim, degree, n_vars, n_skip_, weights=weights )
     end do
 
     if ( present(ext_fun) ) then
@@ -5985,8 +5993,8 @@ contains
     end if
   end function evaluate_reconstruction
 
-  subroutine iterative_solve( this, grid, ext_fun, final_degree, ramp, omega,  &
-                              tol, n_iter, soln_name, output_quad_order )
+  subroutine iterative_solve( this, grid, ext_fun, weights, final_degree, &
+                              ramp, omega, tol, n_iter, soln_name, output_quad_order )
     use set_constants, only : zero
     use combinatorics, only : nchoosek
     use grid_derived_type, only : grid_type
@@ -5994,6 +6002,7 @@ contains
     class(rec_t), intent(inout) :: this
     type(grid_type),  intent(in)    :: grid
     class(func_h_t), optional, intent(in) :: ext_fun
+    real(dp), dimension(0:this%degree), optional, intent(in) :: weights
     integer,         optional, intent(in) :: final_degree
     logical,         optional, intent(in) :: ramp
     real(dp),        optional, intent(in) :: omega, tol
@@ -6041,7 +6050,7 @@ contains
       write(*,'(A,I0)') "reconstructing: p=",i 
       do blk = 1, this%n_blocks
         call this%b(blk)%init_cells( grid, term_start, term_end,               &
-                                     n_vars, [(n,n=1,n_vars)] )
+                                     n_vars, [(n,n=1,n_vars)], weights=weights )
         call this%b(blk)%solve_k( term_end, n_vars, [(n,n=1,n_vars)] )
         if ( any( this%b(blk)%cells%variational ) ) then
           call this%b(blk)%solve_v( term_start, term_end, n_vars, [(n,n=1,n_vars)],&
@@ -6406,7 +6415,7 @@ contains
     call grid%gblock(1)%grid_vars%setup( grid%gblock(1) )
   end subroutine setup_grid_generate
 
-  subroutine setup_reconstruction1( grid, n_dim, n_vars, degree, rec, eval_fun, sort_idx )
+  subroutine setup_reconstruction1( grid, n_dim, n_vars, degree, rec, eval_fun, weights )
     use grid_derived_type,    only : grid_type
     use rec_derived_type,     only : rec_t
     use function_holder_type, only : func_h_t
@@ -6414,9 +6423,9 @@ contains
     integer,                   intent(in)  :: n_dim, n_vars, degree
     type(rec_t),               intent(out) :: rec
     class(func_h_t), optional, intent(in)  :: eval_fun
-    logical,         optional, intent(in)  :: sort_idx
+    real(dp), dimension(0:degree), optional, intent(in) :: weights
 
-    rec = rec_t( grid, n_dim, degree, n_vars, ext_fun=eval_fun, sort_idx=sort_idx )
+    rec = rec_t( grid, n_dim, degree, n_vars, ext_fun=eval_fun, weights=weights )
   end subroutine setup_reconstruction1
 
 end module test_problem
@@ -6442,18 +6451,20 @@ program main
   integer, dimension(3) :: n_nodes, n_ghost, n_skip
   logical :: old
   real(dp), dimension(:,:), allocatable :: space_scale, space_origin
+  real(dp), dimension(:), allocatable :: weights
   integer :: i
 
   degree  = 3
   n_vars  = 1
   n_dim   = 2
-  n_nodes = [5,5,1]
+  n_nodes = [33,33,1]
   n_ghost = [0,0,0]
   n_skip  = [1,1,1]
   old = .false.
 
   allocate( space_scale(n_dim,n_vars) )
   allocate( space_origin(n_dim,n_vars) )
+  allocate( weights(0:degree) )
   space_scale = 0.2_dp
   space_origin = 0.0_dp
   space_origin(1:n_dim,1) = 0.5_dp
@@ -6463,18 +6474,19 @@ program main
                                     space_scale=space_scale, &
                                     space_origin=space_origin) )
 
-  
+  weights(0:degree) = one/[(real(2**(i-1),dp),i=1,degree+1)]
+  weights = one
   call setup_grid( n_dim, n_nodes, n_ghost, grid, delta=0.3_dp )!, x2_map=geom_space_wrapper )
 
   call timer%tic()
-  call setup_reconstruction1( grid, n_dim, n_vars, degree, rec, eval_fun=eval_fun, sort_idx=.true. )
+  call setup_reconstruction1( grid, n_dim, n_vars, degree, rec, eval_fun=eval_fun )
   ! call rec%solve( grid,ext_fun=eval_fun,ramp=.true.,tol=1.0e-10_dp,n_iter=1000,soln_name='test',output_quad_order=12)
-  call rec%solve( grid,ext_fun=eval_fun,ramp=.true.,tol=1.0e-10_dp,n_iter=1000)
+  call rec%solve( grid,ext_fun=eval_fun,ramp=.true.,tol=1.0e-10_dp,n_iter=1000, weights=weights )
   write(*,*) 'Elapsed time: ', timer%toc()
   
   call rec%destroy()
   call grid%destroy()
   call eval_fun%destroy()
   if ( allocated(eval_fun) ) deallocate(eval_fun)
-  deallocate( space_scale, space_origin )
+  deallocate( space_scale, space_origin, weights )
 end program main
