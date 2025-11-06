@@ -247,6 +247,7 @@ module index_conversion
   public :: range_intersect, bound_intersect
   public :: node_to_cell_idx, get_neighbor_idx
   public :: shift_val_to_start
+  public :: get_exterior_mask
 
   interface cell_face_nbors
     module procedure cell_face_nbors_lin
@@ -531,6 +532,27 @@ contains
       list(i+1) = tmp(i)
     end do
   end subroutine shift_val_to_start
+
+  pure subroutine get_exterior_mask(lo,hi,lo2,hi2,mask)
+    integer, dimension(:), intent(in) :: lo, hi, lo2, hi2
+    logical, dimension(product(hi-lo+1)), intent(out) :: mask
+    integer, dimension(size(hi-lo+1)) :: itmp
+    integer :: iG, ni_Cells
+    integer :: j
+
+    ! n_Cells  = product(hi-lo+1)
+    ni_Cells = product(hi2-lo2+1)
+    ! ne_Cells = n_Cells - ni_Cells
+
+    mask = .true.
+    do j = 1,ni_Cells
+      ! get the interior index
+      itmp = global2local_bnd(j,lo2,hi2)
+      ! figure out global index in the larger array
+      iG   = local2global_bnd(itmp,lo,hi)
+      mask(iG) = .false.
+    end do
+  end subroutine get_exterior_mask
 
 end module index_conversion
 
@@ -1375,12 +1397,37 @@ contains
     end do
   end function nchoosek
 
-  pure subroutine get_exponents(n_dim,degree,n_terms,exponents,idx)
+  ! pure subroutine get_exponents(n_dim,degree,n_terms,exponents,idx)
+  !   use index_conversion, only : global2local
+  !   integer, intent(in) :: n_dim, degree, n_terms
+  !   integer, dimension(n_dim,n_terms), intent(out) :: exponents
+  !   integer, dimension(degree+1),      intent(out) :: idx
+  !   integer :: curr_total_degree, j, cnt, N_full_terms
+  !   integer, dimension(n_dim) :: tmp_exp, nsub
+  !   cnt = 0
+  !   do curr_total_degree = 0,degree
+  !     ! idx(curr_total_degree+1) = cnt + 1
+  !     N_full_terms = (curr_total_degree+1) ** n_dim
+  !     do j = 0,N_full_terms
+  !       nSub = curr_total_degree + 1
+  !       tmp_exp = global2local(j+1,nsub)-1
+  !       if ( sum(tmp_exp) == curr_total_degree ) then
+  !         cnt = cnt + 1
+  !         exponents(:,cnt) = tmp_exp
+  !       end if
+  !     end do
+  !     idx(curr_total_degree+1) = cnt
+  !     tmp_exp = 0
+  !   end do
+  ! end subroutine get_exponents
+
+  pure subroutine get_exponents(n_dim,degree,n_terms,exponents,idx,diff_idx)
     use index_conversion, only : global2local
     integer, intent(in) :: n_dim, degree, n_terms
     integer, dimension(n_dim,n_terms), intent(out) :: exponents
     integer, dimension(degree+1),      intent(out) :: idx
-    integer :: curr_total_degree, j, cnt, N_full_terms
+    integer, dimension(n_dim,n_terms), optional, intent(out) :: diff_idx
+    integer :: curr_total_degree, i, j, cnt, N_full_terms
     integer, dimension(n_dim) :: tmp_exp, nsub
     cnt = 0
     do curr_total_degree = 0,degree
@@ -1397,6 +1444,22 @@ contains
       idx(curr_total_degree+1) = cnt
       tmp_exp = 0
     end do
+
+    ! determine corresponding gradient terms of a given term
+    if (present(diff_idx)) then
+      diff_idx = -1 ! last terms (idx(degree)+1:idx(degree+1)) are not defined
+      do j = 1,idx(degree)
+        tmp_exp = exponents(:,j)
+        curr_total_degree = sum(tmp_exp)
+        cnt = 0
+        do i = idx(curr_total_degree+1),idx(curr_total_degree+2)
+          if ( sum( abs( exponents(:,i) - tmp_exp ) )==1 ) then
+            cnt = cnt + 1
+            diff_idx(cnt,j) = i
+          end if
+        end do
+      end do
+    end if
   end subroutine get_exponents
 
 end module combinatorics
@@ -1411,12 +1474,21 @@ module math
   public :: maximal_diameter, maximal_extents
   public :: rand_int_in_range
   public :: compute_pseudo_inverse
+  public :: careful_divide
 
   interface LUsolve
     module procedure LUsolve_single_rhs
     module procedure LUsolve_multiple_rhs
   end interface
 contains
+
+  pure elemental function careful_divide(num,den) result(q)
+    use set_constants, only : near_zero
+    real(dp), intent(in) :: num, den
+    real(dp)             :: q
+    q = num / merge( sign(near_zero,den), den, abs(den)<near_zero )
+  end function careful_divide
+
 
   impure elemental function rand_int_in_range(lo,hi) result(num)
     integer, intent(in) :: lo, hi
@@ -3912,12 +3984,12 @@ module monomial_basis_derived_type
     integer, public :: n_terms
     integer, public, allocatable, dimension(:)   :: idx
     integer, public, allocatable, dimension(:,:) :: exponents
+    integer, public, allocatable, dimension(:,:) :: diff_idx
   contains
     private
     procedure, public, pass :: eval  => evaluate_monomial
     procedure, public, pass :: deval => evaluate_monomial_derivative
     procedure, public, pass :: destroy => destroy_monomial_basis_t
-    procedure, public, pass :: get_derivative_expansion_exponent_terms
   end type monomial_basis_t
 
   interface monomial_basis_t
@@ -3938,14 +4010,16 @@ contains
     this%n_terms = nchoosek( n_dim + total_degree, total_degree )
     allocate( this%exponents( this%n_dim, this%n_terms ) )
     allocate( this%idx(this%total_degree+1) )
+    allocate( this%diff_idx( this%n_dim, this%n_terms ) )
     call get_exponents( this%n_dim, this%total_degree, this%n_terms,           &
-                        this%exponents, this%idx )
+                        this%exponents, this%idx, diff_idx=this%diff_idx )
   end function constructor
   
   pure subroutine destroy_monomial_basis_t(this)
     class(monomial_basis_t), intent(inout) :: this
     if ( allocated(this%exponents) ) deallocate( this%exponents )
     if ( allocated(this%idx) )       deallocate( this%idx )
+    if ( allocated(this%diff_idx) )  deallocate( this%diff_idx )
   end subroutine destroy_monomial_basis_t
 
   pure subroutine evaluate_monomial(this,term,x,val,coef)
@@ -3995,27 +4069,6 @@ contains
       end do
     end do
   end subroutine evaluate_monomial_derivative
-
-  pure function get_derivative_expansion_exponent_terms(this,term) result(terms)
-    class(monomial_basis_t), intent(in) :: this
-    integer,                 intent(in) :: term
-    integer, dimension(this%n_dim)      :: terms
-    integer :: i, cnt, term_degree
-    integer, dimension(this%n_dim) :: curr_exponent
-
-    terms = -1
-    curr_exponent = this%exponents(:,term)
-    term_degree   = sum(curr_exponent)
-    if (term>this%idx(this%total_degree)) return
-    
-    cnt = 0
-    do i = this%idx(term_degree+1),this%idx(term_degree+2)
-      if (sum( abs(this%exponents(:,i) - curr_exponent) )==1) then
-        cnt = cnt + 1
-        terms(cnt) = i
-      end if
-    end do
-  end function get_derivative_expansion_exponent_terms
 
 end module monomial_basis_derived_type
 
@@ -4352,6 +4405,7 @@ module zero_mean_basis_derived_type
     procedure, public, pass :: drec_eval => evaluate_reconstruction_derivative
     procedure, public, pass :: scaled_basis_derivative, scaled_weighted_basis_derivative
     procedure, public, pass :: scaled_basis_derivatives
+    procedure, public, pass :: transform_coefs
     procedure, public, pass :: destroy => destroy_zero_mean_basis_t
 
   end type zero_mean_basis_t
@@ -4641,6 +4695,26 @@ pure function scaled_basis_derivatives( this, p, term_start, term_end,         &
   end if
 end function scaled_basis_derivatives
 
+pure function transform_coefs(this,p,coefs,n_terms,n_var,var_idx) result(tcoefs)
+  use set_constants, only : one
+  class(zero_mean_basis_t),   intent(in) :: this
+  type(monomial_basis_t),     intent(in) :: p
+  real(dp), dimension(:,:),   intent(in) :: coefs
+  integer,                    intent(in) :: n_terms, n_var
+  integer,  dimension(n_var), intent(in) :: var_idx
+  real(dp), dimension(n_terms,n_var)     :: tcoefs
+  real(dp), dimension(n_terms) :: xden
+  integer :: n, v, coef
+
+  do n = 1,n_terms
+    call p%eval(n,this%h_ref,xden(n),coef)
+  end do
+  xden = one / xden
+  do v = 1,n_var
+    tcoefs(:,v) = coefs(1:n_terms,var_idx(v)) * xden
+  end do
+end function transform_coefs
+
 pure function evaluate_reconstruction( this, p, point, coefs, n_terms, n_var, var_idx ) result(val)
     use set_constants, only : zero
     class(zero_mean_basis_t),   intent(in) :: this
@@ -4702,6 +4776,7 @@ module zero_mean_limiter_type
     procedure, public, pass :: destroy => destroy_limiter
     procedure, public, pass :: update_min_max
     procedure, public, pass :: update_limiter => update_alpha
+    procedure, public, pass :: eval => evaluate_limited_reconstruction
   end type zero_mean_limit_t
   interface zero_mean_limit_t
     module procedure constructor
@@ -4735,115 +4810,107 @@ contains
     this%alpha = one
   end function constructor
 
+  ! call this for the corresponding cell and its face neighbors
   pure subroutine update_min_max( this, p, basis, coefs )
     class(zero_mean_limit_t), intent(inout) :: this
     class(monomial_basis_t),  intent(in)    :: p
     class(zero_mean_basis_t), intent(in)    :: basis
     real(dp), dimension(:,:), intent(in)    :: coefs
+    real(dp), dimension(p%n_terms,this%n_vars) :: tcoefs
     integer :: v, d, term
-    real(dp) :: u_c
+    tcoefs = basis%transform_coefs(p,coefs,p%n_terms,this%n_vars,this%var_idx)
     do v = 1,this%n_vars
       do d = 1,p%total_degree
         do term = p%idx(d)+1,p%idx(d+1)
-          u_c = get_c_val(p,basis,coefs(:,this%var_idx(v)),term)
-          this%v_min(d,v) = min( this%v_min(d,v), u_c )
-          this%v_max(d,v) = max( this%v_max(d,v), u_c )
+          this%v_min(d,v) = min( this%v_min(d,v), tcoefs(term,v) )
+          this%v_max(d,v) = max( this%v_max(d,v), tcoefs(term,v) )
         end do
       end do
     end do
   end subroutine update_min_max
 
+  pure function get_alpha_val(n_dim,grad,dx,u_c,u_min,u_max) result(alpha)
+    use set_constants, only : near_zero, one
+    use math,          only : careful_divide
+    integer,                    intent(in) :: n_dim
+    real(dp), dimension(n_dim), intent(in) :: grad, dx
+    real(dp),                   intent(in) :: u_c, u_min, u_max
+    real(dp)                               :: alpha
+    real(dp) :: num, den, tmp
+    alpha = one
+    if (sum(abs(dx))<near_zero)   return
+    if (sum(abs(grad))<near_zero) return
+    den = dot_product(grad,dx)
+    num = merge(u_max,u_min,den>0) - u_c
+    alpha = min(one,careful_divide(num,den))
+    tmp = near_zero
+  end function get_alpha_val
+
+  ! call this for the corresponding cell
   pure subroutine update_alpha( this, p, basis, point, coefs )
+    use set_constants, only : zero, large
     class(zero_mean_limit_t), intent(inout) :: this
     class(monomial_basis_t),  intent(in)    :: p
     class(zero_mean_basis_t), intent(in)    :: basis
     real(dp), dimension(:),   intent(in)    :: point
     real(dp), dimension(:,:), intent(in)    :: coefs
+    real(dp), dimension(p%n_terms,this%n_vars) :: tcoefs
+    integer, dimension(p%n_dim) :: grad_idx
+    real(dp), dimension(p%n_dim) :: grad, dx
+    real(dp) :: alpha
     integer :: v, d, term
-    real(dp) :: u_c
+    tcoefs = basis%transform_coefs(p,coefs,p%n_terms,this%n_vars,this%var_idx)
+    dx = point(1:p%n_dim) - basis%x_ref
     do v = 1,this%n_vars
-      do d = p%total_degree,2,-1
+      do d = p%total_degree-1,1,-1
+        alpha = large
         do term = p%idx(d)+1,p%idx(d+1)
-          call get_min_alpha_val(this,p,basis,coefs,term,point,this%alpha)
-          u_c = get_c_val(p,basis,coefs(:,this%var_idx(v)),term)
-          this%v_min(d,v) = min( this%v_min(d,v), u_c )
-          this%v_max(d,v) = max( this%v_max(d,v), u_c )
+          grad_idx = p%diff_idx(:,term)
+          if ( any(grad_idx<1) ) then
+            grad = zero
+          else
+            grad = this%alpha(d+1,v)*tcoefs(grad_idx,v)
+            ! grad = tcoefs(grad_idx,v)
+          end if
+          associate( u_c   => tcoefs(term,v),  &
+                     u_min => this%v_min(d,v), &
+                     u_max => this%v_max(d,v) )
+            alpha = min( alpha, get_alpha_val(p%n_dim,grad,dx,u_c,u_min,u_max) )
+          end associate
         end do
+        this%alpha(d+1,v) = alpha
       end do
-      this%alpha(1,v) = max( this%alpha(1,v), this%alpha(2,v) )
+      ! this%alpha(1,v) = max(this%alpha(1,v),this%alpha(2,v))
     end do
   end subroutine update_alpha
 
-  pure function get_c_val(p,basis,coefs,term) result(u_c)
-    class(monomial_basis_t),  intent(in) :: p
-    class(zero_mean_basis_t), intent(in) :: basis
-    real(dp), dimension(:),   intent(in) :: coefs
-    integer,                  intent(in) :: term
-    real(dp)                             :: u_c
-    u_c = coefs(term) / product( basis%h_ref ** p%exponents(:,term) )
-  end function get_c_val
-
-  pure function get_grad(p,basis,coefs,term) result(grad)
-    use set_constants, only : zero
-    class(monomial_basis_t),  intent(in) :: p
-    class(zero_mean_basis_t), intent(in) :: basis
-    real(dp), dimension(:),   intent(in) :: coefs
-    integer,                  intent(in) :: term
-    real(dp), dimension(p%n_dim)         :: grad
-    integer,  dimension(p%n_dim) :: terms
-    integer :: i
-    grad = zero
-    terms = p%get_derivative_expansion_exponent_terms(term)
-    if (terms(1)<0) return
-    do i = 1,p%n_dim
-      grad(i) = get_c_val(p,basis,coefs,terms(i))
+  pure function evaluate_limited_reconstruction( this, basis, p, point, n_terms,              &
+                                                 coefs ) result(val)
+    use set_constants, only : zero, one
+    class(zero_mean_limit_t),   intent(in) :: this
+    class(zero_mean_basis_t),   intent(in) :: basis
+    type(monomial_basis_t),     intent(in) :: p
+    real(dp), dimension(:),     intent(in) :: point
+    integer,                    intent(in) :: n_terms
+    real(dp), dimension(:,:),   intent(in) :: coefs
+    real(dp), dimension(this%n_vars)        :: val
+    real(dp), dimension(n_terms) :: local_basis
+    real(dp) :: alpha_tmp
+    integer :: v, n, d, cnt
+    val = zero
+    do n = 1,n_terms
+      local_basis(n) = basis%eval(p,n,point)
     end do
-  end function get_grad
-
-  pure function local_linear_rec( n_dim, u_c, grad, dx ) result( val )
-    integer,                    intent(in) :: n_dim
-    real(dp),                   intent(in) :: u_c
-    real(dp), dimension(n_dim), intent(in) :: grad, dx
-    real(dp)                               :: val
-    val = u_c + dot_product(grad,dx)
-  end function local_linear_rec
-
-  pure function get_alpha_val(n_dim,u_c,u_min,u_max,grad,dx) result(alpha)
-    use set_constants, only : one, near_zero
-    integer,                    intent(in) :: n_dim
-    real(dp),                   intent(in) :: u_c, u_min, u_max
-    real(dp), dimension(n_dim), intent(in) :: grad, dx
-    real(dp)                               :: alpha
-    real(dp) :: u_i, delta, num, den
-    u_i = local_linear_rec(n_dim,u_c,grad,dx)
-    den = u_i - u_c
-    den = sign(one,den) * max(abs(den),near_zero)
-    num = merge(u_max,u_min,den>0)
-    alpha = min(one,num/den)
-  end function get_alpha_val
-
-  pure subroutine get_min_alpha_val(this,p,basis,coefs,term,point,alpha)
-    use set_constants, only : zero
-    class(zero_mean_limit_t), intent(in)    :: this
-    class(monomial_basis_t),  intent(in)    :: p
-    class(zero_mean_basis_t), intent(in)    :: basis
-    real(dp), dimension(:,:), intent(in)    :: coefs
-    integer,                  intent(in)    :: term
-    real(dp), dimension(:),   intent(in)    :: point
-    real(dp), dimension(this%total_degree,this%n_vars), intent(inout) :: alpha
-    real(dp), dimension(p%n_dim) :: grad, dx
-    integer, dimension(p%n_dim)  :: terms
-    integer :: i, v, order
-    real(dp) :: u_c, alpha_tmp
-    order = sum( p%exponents(:,term) )
-    dx = point(1:p%n_dim) - basis%x_ref
     do v = 1,this%n_vars
-      grad = get_grad(p,basis,alpha(order,v)*coefs(:,this%var_idx(v)),term)
-      u_c  = get_c_val(p,basis,coefs(:,this%var_idx(v)),term)
-      alpha_tmp = get_alpha_val(p%n_dim,u_c,this%v_min(order,v),this%v_max(order,v),grad,dx)
-      alpha(order,v) = min(alpha(order,v),alpha_tmp)
+      val(v) = coefs(1,this%var_idx(v))
+      do d = 1,p%total_degree
+        alpha_tmp = this%alpha(d,v)
+        do n = p%idx(d)+1,p%idx(d+1)
+          val(v) = val(v) + this%alpha(d,v) * coefs(n,this%var_idx(v)) * local_basis(n)
+        end do
+      end do
     end do
-  end subroutine get_min_alpha_val
+  end function evaluate_limited_reconstruction
 
   ! pure function evaluate_reconstruction_derivative( basis, p, point, n_terms,              &
   !                                        n_var, var_idx, order ) result(val)
@@ -4868,42 +4935,6 @@ contains
 
 
 end module zero_mean_limiter_type
-
-! module limiter_block_type
-!   use zero_mean_limiter_type, only : zero_mean_limit_t
-!   use zero_mean_basis_derived_type, only : zero_mean_basis_t
-!   use monomial_basis_derived_type,  only : monomial_basis_t
-!   implicit none
-!   private
-!   public :: limiter_block_t
-
-!   type limiter_block_t
-!     integer :: n_total_cells
-!     type(zero_mean_limit_t), dimension(:), allocatable :: lim
-!   contains
-!     private
-!     procedure, public, pass :: destroy => destroy_limiter_block
-!     procedure, public, pass :: update  => update_limiter
-!   end type limiter_block_t
-
-!   interface limiter_block_t
-!     module procedure constructor
-!   end interface limiter_block_t
-! contains
-!   pure elemental subroutine destroy_limiter_block( this )
-!     class(limiter_block_t), intent(inout) :: this
-!     if (allocated( this%lim) ) then
-!       call this%lim%destroy()
-!       deallocate( this%lim )
-!     end if
-!     n_total_cells = 0
-!   end subroutine destroy_limiter_block
-
-!   pure function constructor(p) result(this)
-!     type(monomial_basis_t), intent(in) :: p
-!     type(limiter_block_t) :: this
-!   end function constructor
-! end module limiter_block_type
 
 module reconstruct_cell_derived_type
   use set_precision,                only : dp
@@ -4931,6 +4962,7 @@ module reconstruct_cell_derived_type
     ! procedure, public, pass :: initialize_super
     procedure, public, pass :: destroy => destroy_cell_rec
     procedure, public, pass :: eval    => evaluate_reconstruction
+    procedure, public, pass :: deval   => evaluate_reconstruction_derivative
     procedure, public, pass :: set_cell_avg => set_cell_avg_func, set_cell_avg_val
     procedure, public, pass :: set_cell_coefs, get_cell_error
     procedure, public, pass :: get_nbor_contribution
@@ -5352,6 +5384,7 @@ module rec_block_derived_type
     procedure, public, pass :: solve_k  => solve_k_exact_block
     procedure, public, pass :: get_nbors
     procedure, public, pass :: eval => evaluate_block_rec
+    procedure, public, pass :: eval_lim => evaluate_block_rec_limited
     procedure, public, pass :: set_cell_avgs => set_cell_avgs_fun
     procedure,         pass :: get_cell_h_ref
     procedure,         pass :: init_cell_k, init_cell_v, solve_cell_k
@@ -5363,6 +5396,7 @@ module rec_block_derived_type
     procedure,         pass :: residual_norm
     procedure,         pass :: SOR_iteration
     procedure,         pass :: k_exact_to_var, var_to_k_exact
+    procedure,         pass :: determine_maximum_degree
   end type rec_block_t
 
   interface rec_block_t
@@ -5385,31 +5419,9 @@ contains
     this%n_cells_total = 0
   end subroutine destroy_rec_block
 
-  pure subroutine get_exterior_mask(lo,hi,lo2,hi2,mask)
-    use index_conversion, only : global2local_bnd, local2global_bnd
-    integer, dimension(:), intent(in) :: lo, hi, lo2, hi2
-    logical, dimension(product(hi-lo+1)), intent(out) :: mask
-    integer, dimension(size(hi-lo+1)) :: itmp
-    integer :: iG, ni_Cells
-    integer :: j
-
-    ! n_Cells  = product(hi-lo+1)
-    ni_Cells = product(hi2-lo2+1)
-    ! ne_Cells = n_Cells - ni_Cells
-
-    mask = .true.
-    do j = 1,ni_Cells
-      ! get the interior index
-      itmp = global2local_bnd(j,lo2,hi2)
-      ! figure out global index in the larger array
-      iG   = local2global_bnd(itmp,lo,hi)
-      mask(iG) = .false.
-    end do
-  end subroutine get_exterior_mask
-
   function constructor( grid, block_num, n_dim, degree, n_var, n_skip, mask, weights ) result(this)
     use math,              only : maximal_extents
-    use index_conversion,  only : global2local_bnd
+    use index_conversion,  only : global2local_bnd, get_exterior_mask
     use grid_derived_type, only : grid_type
     use reconstruct_cell_derived_type, only : rec_cell_t
     implicit none
@@ -5451,10 +5463,10 @@ contains
     hi = 1
     hi(1:this%n_dim) = this%n_cells
 
-    ! max_degree = determine_maximum_degree(this,grid,block_num,min_sz)
+    ! max_degree = this%determine_maximum_degree(grid,block_num,min_sz)
 
     ! call get_exterior_mask(lo(1:this%n_dim),hi(1:this%n_dim),lo(1:this%n_dim)+max_degree,hi(1:this%n_dim)-max_degree*0,mask_)
-    mask_ = .true.
+    ! mask_ = .true.
 
     idx_tmp = 1
     do i = 1,this%n_cells_total
@@ -5544,6 +5556,35 @@ contains
     val = this%cells(lin_idx)%eval( this%p, x, n_terms_, n_vars, vars )
   end function evaluate_block_rec
 
+  pure function evaluate_block_rec_limited( this, limit, cell_idx, x, vars, n_terms ) result(val)
+    use index_conversion, only : local2global
+    use zero_mean_limiter_type, only : zero_mean_limit_t
+    class(rec_block_t),     intent(in) :: this
+    class(zero_mean_limit_t), intent(in) :: limit
+    integer,  dimension(:), intent(in) :: cell_idx
+    real(dp), dimension(:), intent(in) :: x
+    integer,  dimension(:), intent(in) :: vars
+    integer,  optional,     intent(in) :: n_terms
+    real(dp), dimension(size(vars))    :: val
+    real(dp), dimension(limit%n_vars) :: limit_val
+    integer :: n_terms_, n_vars, lin_idx, v, i
+
+    n_vars = size(vars)
+    n_terms_ = this%p%n_terms
+    if ( present(n_terms) ) n_terms_ = max(min(n_terms_,n_terms),1)
+
+    lin_idx = local2global( cell_idx(1:this%n_dim), this%n_cells )
+
+    val = this%cells(lin_idx)%eval( this%p, x, n_terms_, n_vars, vars )
+
+    limit_val = limit%eval( this%cells(lin_idx)%basis, this%p, x, n_terms, this%cells(lin_idx)%coefs )
+    do v = 1,limit%n_vars
+      do i = 1,n_vars
+        if (limit%var_idx(v)==vars(i)) val(i) = limit_val(v)
+      end do
+    end do
+  end function evaluate_block_rec_limited
+
   pure subroutine set_cell_avgs_fun(this,gblock,n_var,var_idx,eval_fun)
     use grid_derived_type,       only : grid_block
     use index_conversion,        only : global2local
@@ -5598,16 +5639,25 @@ contains
     integer :: i
 
     nbor_face_id = 0
-    n_interior   = 0
+    
+    n_nbors    = 2*this%n_dim
+    n_interior = 0
+    call cell_face_nbors( this%n_dim, lin_idx, [(1,i=1,this%n_dim)], this%n_cells(1:this%n_dim),               &
+                          nbor_idx(1:n_nbors), nbor_face_id(1:n_nbors), n_interior )
 
     if ( .not. variational ) then
       call get_k_exact_nbors( this, grid, blk, lin_idx, min_sz, n_nbors, nbor_block, nbor_idx )
     else
-      n_nbors    = 2*this%n_dim
-      n_interior = 0
-      call cell_face_nbors( this%n_dim, lin_idx, [(1,i=1,this%n_dim)], this%n_cells(1:this%n_dim),               &
-                            nbor_idx, nbor_face_id, n_interior )
+      
     end if
+    ! if ( .not. variational ) then
+    !   call get_k_exact_nbors( this, grid, blk, lin_idx, min_sz, n_nbors, nbor_block, nbor_idx )
+    ! else
+    !   n_nbors    = 2*this%n_dim
+    !   n_interior = 0
+    !   call cell_face_nbors( this%n_dim, lin_idx, [(1,i=1,this%n_dim)], this%n_cells(1:this%n_dim),               &
+    !                         nbor_idx(1:n_nbors), nbor_face_id(1:n_nbors), n_interior )
+    ! end if
   end subroutine get_nbors
 
   pure function get_cell_error( this, quad, lin_idx, n_terms, norm,            &
@@ -6213,9 +6263,98 @@ end module rec_block_derived_type
 
 
 
+module limiter_block_type
+  use zero_mean_limiter_type,       only : zero_mean_limit_t
+  use zero_mean_basis_derived_type, only : zero_mean_basis_t
+  use monomial_basis_derived_type,  only : monomial_basis_t
+  use rec_block_derived_type,       only : rec_block_t
+  implicit none
+  private
+  public :: limiter_block_t
+
+  type limiter_block_t
+    integer :: n_cells_total
+    type(zero_mean_limit_t), dimension(:), allocatable :: lim
+  contains
+    private
+    procedure, public, pass :: destroy => destroy_limiter_block
+    procedure, public, pass :: update  => update_limiter_block
+  end type limiter_block_t
+
+  interface limiter_block_t
+    module procedure constructor
+  end interface limiter_block_t
+contains
+  pure elemental subroutine destroy_limiter_block( this )
+    class(limiter_block_t), intent(inout) :: this
+    if (allocated( this%lim) ) then
+      call this%lim%destroy()
+      deallocate( this%lim )
+    end if
+    this%n_cells_total = 0
+  end subroutine destroy_limiter_block
+
+  ! type :: rec_block_t
+  !   integer :: block_num, n_dim, degree, n_vars, n_cells_total
+  !   integer,   dimension(3) :: n_skip
+  !   integer,   dimension(:), allocatable :: n_cells
+  !   type(rec_cell_t), dimension(:), allocatable :: cells
+  !   type(monomial_basis_t) :: p
+  pure function constructor(rec_block,var_idx) result(this)
+    type(rec_block_t),     intent(in) :: rec_block
+    integer, dimension(:), intent(in) :: var_idx
+    type(limiter_block_t)              :: this
+    integer :: i, n_vars
+    n_vars = size(var_idx)
+    associate( n_cells_total => rec_block%n_cells_total, &
+               degree        => rec_block%degree )
+      this%n_cells_total = n_cells_total
+      allocate( this%lim(n_cells_total) )
+      do i = 1,n_cells_total
+        this%lim(i) = zero_mean_limit_t( degree, n_vars, var_idx )
+      end do
+    end associate
+  end function constructor
+
+  pure subroutine update_limiter_block( this, rblock, gblock )
+    use index_conversion,  only : global2local
+    use grid_derived_type, only : grid_block
+    class(limiter_block_t), intent(inout) :: this
+    type(rec_block_t),      intent(in)    :: rblock
+    type(grid_block),       intent(in)    :: gblock
+    integer :: i, n, j
+    integer, dimension(3) :: idx
+    
+    ! first get the min-max values for coefficients
+    do i = 1,this%n_cells_total
+      call this%lim(i)%update_min_max(rblock%p,rblock%cells(i)%basis,rblock%cells(i)%coefs)
+      do n = 1,rblock%cells(i)%n_interior
+        j = rblock%cells(i)%nbor_idx(n)
+        call this%lim(i)%update_min_max(rblock%p,rblock%cells(j)%basis,rblock%cells(j)%coefs)
+      end do
+    end do
+
+    ! now calculate limiter values
+    do i = 1,this%n_cells_total
+      idx = global2local(i,gblock%n_cells)
+      associate( quad => gblock%grid_vars%quad(idx(1),idx(2),idx(3)) )
+      do n = 1,quad%n_quad
+        call this%lim(i)%update_limiter(rblock%p,rblock%cells(i)%basis,quad%quad_pts(:,n),rblock%cells(i)%coefs)
+      end do
+      end associate
+    end do
+
+  end subroutine update_limiter_block
+    
+
+end module limiter_block_type
+
+
+
 module rec_derived_type
   use set_precision,          only : dp
   use rec_block_derived_type, only : rec_block_t
+  use limiter_block_type,     only : limiter_block_t
   use function_holder_type,   only : func_h_t
   implicit none
   private
@@ -6224,7 +6363,9 @@ module rec_derived_type
   type :: rec_t
     private
     integer, public :: n_blocks, n_dim, n_vars, degree
+    logical, public :: has_limiter
     type(rec_block_t), dimension(:), allocatable, public :: b
+    type(limiter_block_t), dimension(:), allocatable, public :: limb
   contains
     private
     procedure, public, pass :: destroy => destroy_rec_t
@@ -6242,13 +6383,18 @@ contains
       call this%b%destroy()
       deallocate( this%b )
     end if
+    if ( allocated(this%limb) ) then
+      call this%limb%destroy()
+      deallocate( this%limb )
+    end if
+    this%has_limiter = .false.
     this%n_blocks = 0
     this%n_dim    = 0
     this%n_vars   = 0
     this%degree   = 0
   end subroutine destroy_rec_t
 
-  function constructor( grid, n_dim, degree, n_vars, n_skip, ext_fun, weights ) result(this)
+  function constructor( grid, n_dim, degree, n_vars, n_skip, ext_fun, weights, limit ) result(this)
     use grid_derived_type,      only : grid_type
     use rec_block_derived_type, only : rec_block_t
     use function_holder_type,   only : func_h_t
@@ -6257,6 +6403,7 @@ contains
     integer, dimension(:),     optional, intent(in) :: n_skip
     class(func_h_t), optional,           intent(in) :: ext_fun
     real(dp), dimension(0:degree), optional, intent(in) :: weights
+    logical,                       optional, intent(in) :: limit
     type(rec_t) :: this
     integer, dimension(3) :: n_skip_
     integer :: i, n
@@ -6280,6 +6427,16 @@ contains
       do i = 1,this%n_blocks
         call this%b(i)%set_cell_avgs( grid%gblock(i), n_vars, [(n,n=1,n_vars)],&
                                       ext_fun )
+      end do
+    end if
+
+    this%has_limiter = .false.
+    if ( present(limit) ) this%has_limiter = limit
+
+    if ( this%has_limiter ) then
+      allocate( this%limb(this%n_blocks) )
+      do i = 1,this%n_blocks
+        this%limb(i) = limiter_block_t(this%b(i),[(n,n=1,n_vars)])
       end do
     end if
   end function constructor
@@ -6382,8 +6539,23 @@ contains
             write(*,'(I0,3(" ",ES18.12))') v, (error_norms(v,n), n = 1,3)
           end do
         end if
+        if ( this%has_limiter ) then
+          call this%limb(blk)%update( this%b(blk), grid%gblock(blk) )
+        end if
         if (present(soln_name)) then
-          call output_block_reconstruction( grid%gblock(blk), this%b(blk),   &
+          if ( this%has_limiter ) then
+            call output_block_reconstruction( grid%gblock(blk), this%b(blk), &
+                                            blk, soln_name, old,             &
+                                            limiter_block=this%limb(blk),    &
+                                            quad_order=quad_order,           &
+                                            ext_fun=ext_fun,                 &
+                                            rec_out=.true.,                  &
+                                            ext_out=.true.,                  &
+                                            err_out=.true.,                  &
+                                            strand_id=i+1,                   &
+                                            solution_time=real(i,dp) )
+          else
+            call output_block_reconstruction( grid%gblock(blk), this%b(blk),   &
                                             blk, soln_name, old,             &
                                             quad_order=quad_order,           &
                                             ext_fun=ext_fun,                 &
@@ -6392,14 +6564,14 @@ contains
                                             err_out=.true.,                  &
                                             strand_id=i+1,                   &
                                             solution_time=real(i,dp) )
+          end if
         end if
-
       end do
     end do
   end subroutine iterative_solve
 
   subroutine output_block_reconstruction( gblock1, rec, blk, base_name, old, &
-                                          n_skip, quad_order,                &
+                                          limiter_block, n_skip, quad_order, &
                                           ext_fun, rec_out, ext_out, err_out,&
                                           n_terms, tag,                      &
                                           solution_time, strand_id )
@@ -6407,12 +6579,14 @@ contains
     use index_conversion, only : global2local
     use rec_block_derived_type,     only : rec_block_t
     use grid_derived_type,          only : grid_block
+    use limiter_block_type,         only : limiter_block_t
     use function_holder_type,       only : func_h_t
     type(grid_block),                intent(in)    :: gblock1
     type(rec_block_t),               intent(in)    :: rec
     integer,                         intent(in)    :: blk
     character(*),                    intent(in)    :: base_name
     logical,                         intent(inout) :: old
+    type(limiter_block_t), optional, intent(in)    :: limiter_block
     integer, dimension(:), optional, intent(in)    :: n_skip
     integer,               optional, intent(in)    :: quad_order
     class(func_h_t),       optional, intent(in)    :: ext_fun
@@ -6430,20 +6604,37 @@ contains
       file_name = trim(file_name)//'.dat'
     end if
 
-    do i = 1,rec%n_cells_total
-      call output_cell_reconstruction( gblock1, rec, blk,                      &
-                                       global2local(i,rec%n_cells),            &
-                                       file_name, old,                         &
-                                       n_skip=n_skip,                          &
-                                       quad_order=quad_order,                  &
-                                       ext_fun=ext_fun,                        &
-                                       rec_out=rec_out,                        &
-                                       ext_out=ext_out,                        &
-                                       err_out=err_out,                        &
-                                       n_terms=n_terms,                        &
-                                       strand_id=strand_id,                    &
-                                       solution_time=solution_time )
-    end do
+    if ( present(limiter_block) ) then
+      do i = 1,rec%n_cells_total
+        call output_cell_reconstruction_limited( gblock1, rec, limiter_block, blk,                      &
+                                        global2local(i,rec%n_cells),            &
+                                        file_name, old,                         &
+                                        n_skip=n_skip,                          &
+                                        quad_order=quad_order,                  &
+                                        ext_fun=ext_fun,                        &
+                                        rec_out=rec_out,                        &
+                                        ext_out=ext_out,                        &
+                                        err_out=err_out,                        &
+                                        n_terms=n_terms,                        &
+                                        strand_id=strand_id,                    &
+                                        solution_time=solution_time )
+      end do
+    else
+      do i = 1,rec%n_cells_total
+        call output_cell_reconstruction( gblock1, rec, blk,                      &
+                                        global2local(i,rec%n_cells),            &
+                                        file_name, old,                         &
+                                        n_skip=n_skip,                          &
+                                        quad_order=quad_order,                  &
+                                        ext_fun=ext_fun,                        &
+                                        rec_out=rec_out,                        &
+                                        ext_out=ext_out,                        &
+                                        err_out=err_out,                        &
+                                        n_terms=n_terms,                        &
+                                        strand_id=strand_id,                    &
+                                        solution_time=solution_time )
+      end do
+    end if
   end subroutine output_block_reconstruction
 
   subroutine output_cell_reconstruction( gblock1, rec, blk, cell_idx,          &
@@ -6595,6 +6786,156 @@ contains
     deallocate( var_names, tmp_var, NODE_DATA )
   end subroutine output_cell_reconstruction
 
+  subroutine output_cell_reconstruction_limited( gblock1, rec, lim, blk, cell_idx,          &
+                                         file_name, old, n_skip, quad_order,   &
+                                         ext_fun, rec_out, ext_out, err_out,   &
+                                         n_terms, strand_id, solution_time )
+    use index_conversion, only : local2global
+    use quadrature_derived_type, only : num_quad_pts, quad_t
+    use tecplot_output, only : write_tecplot_ordered_zone_header
+    use tecplot_output, only : write_tecplot_ordered_zone_block_packed
+    use rec_block_derived_type, only : rec_block_t
+    use grid_derived_type,          only : grid_block
+    use function_holder_type,       only : func_h_t
+    type(grid_block),                intent(in)    :: gblock1
+    type(rec_block_t),               intent(in)    :: rec
+    type(limiter_block_t),           intent(in)    :: lim
+    integer,                         intent(in)    :: blk
+    integer, dimension(:),           intent(in)    :: cell_idx
+    character(*),                    intent(in)    :: file_name
+    logical,                         intent(inout) :: old
+    integer, dimension(:), optional, intent(in)    :: n_skip
+    integer,               optional, intent(in)    :: quad_order
+    class(func_h_t),       optional, intent(in)    :: ext_fun
+    logical,               optional, intent(in)    :: rec_out, ext_out, err_out
+    integer,               optional, intent(in)    :: n_terms
+    integer,               optional, intent(in)    :: strand_id
+    real(dp),              optional, intent(in)    :: solution_time
+    integer :: quad_order_, lin_idx
+    integer,  dimension(rec%n_dim) :: n_nodes
+    integer, dimension(3) :: n_skip_
+    real(dp), dimension(rec%n_dim) :: x
+    real(dp), dimension(0,0) :: CELL_DATA
+    real(dp), dimension(:,:), allocatable :: NODE_DATA, tmp_var
+    logical, dimension(3) :: opt
+    type(quad_t) :: phys_quad
+    character(*), dimension(3), parameter :: var_prefix = ['REC','EXT','ERR']
+    character(*), dimension(3), parameter :: xyz        = ['x','y','z']
+    character(*), dimension(7), parameter :: var_suffix = ['rho',              &
+                                                           'u  ',              &
+                                                           'v  ',              &
+                                                           'w  ',              &
+                                                           'p  ',              &
+                                                           't1 ',              &
+                                                           't2 ']
+    character(100), dimension(:), allocatable :: var_names
+    character(100) :: zone_name
+    
+
+    integer :: n_dim, n_node_vars, n_cell_vars, n_vars, n_terms_
+    integer :: fid, n, i, j, cnt
+    logical :: file_exists
+
+    n_dim = rec%n_dim
+
+    lin_idx = local2global(cell_idx(1:n_dim),rec%n_cells)
+
+    n_skip_ = 1
+    if ( present(n_skip) ) n_skip_(1:n_dim) = n_skip(1:n_dim)
+    n_skip_(n_dim+1:) = 0
+
+    quad_order_ = 1
+    if ( present(quad_order) ) quad_order_ = quad_order
+
+    call get_cell_quad( gblock1, cell_idx, n_skip_, quad_order_, phys_quad )
+
+    n_nodes     = num_quad_pts(quad_order_,n_dim,.true.)
+
+    opt = .false.
+    if ( present(rec_out) ) opt(1) = rec_out
+    if ( present(ext_fun) ) then
+      if ( present(ext_out) ) opt(2) = ext_out
+      if ( present(err_out) ) opt(3) = err_out
+    end if
+    n_terms_ = rec%p%n_terms
+    if ( present(n_terms) ) n_terms_ = max(min(n_terms_,n_terms),1)
+
+    
+    n_node_vars = n_dim + count(opt)*rec%n_vars
+    n_cell_vars = 0
+    n_vars      = n_node_vars + n_cell_vars
+
+    allocate( var_names( n_vars ) )
+    allocate( tmp_var(   rec%n_vars, 3 ) )
+    allocate( NODE_DATA( n_node_vars, phys_quad%n_quad ) )
+
+    
+    if (n_dim==1) then
+      write(zone_name,'(A)') "('CELL:(',I0,',[',I0,'])')"
+    else
+      write(zone_name,'(A,I0,A)') "('CELL:(',I0,',[',I0,",n_dim-1,"(',',I0),'])')"
+    end if
+    write(zone_name,trim(zone_name)) blk, cell_idx(1:n_dim)
+
+    cnt = 0
+    do i = 1,n_dim
+      cnt = cnt + 1
+      var_names(cnt) = xyz(i)
+    end do
+    do j = 1,3
+      if (.not. opt(j)) cycle
+      do i = 1,rec%n_vars
+        cnt = cnt + 1
+        write(var_names(cnt),'(A)') var_prefix(j)//':'//trim(var_suffix(i))
+      end do
+    end do
+
+    do n = 1,phys_quad%n_quad
+      x = phys_quad%quad_pts(1:n_dim,n)
+      NODE_DATA( 1:n_dim, n ) = x
+      tmp_var(:,1) = rec%eval_lim( lim%lim(lin_idx), cell_idx, x, [(i,i=1,rec%n_vars)],              &
+                               n_terms=n_terms_ )
+      if ( opt(2) .or. opt(3) ) then
+        tmp_var(:,2) = ext_fun%eval(x)
+        tmp_var(:,3) = tmp_var(:,1) - tmp_var(:,2)
+      end if
+      cnt = n_dim
+      do j = 1,3
+        if (.not. opt(j)) cycle
+        do i = 1,rec%n_vars
+          cnt = cnt + 1
+          NODE_DATA(cnt,n) = tmp_var(i,j)
+        end do
+      end do
+    end do
+    
+    inquire( file=trim(file_name), exist=file_exists )
+    if ( file_exists ) then
+      if (.not.old) then
+        open( newunit=fid, file=trim(file_name), status='unknown')
+      else
+        open( newunit=fid, file=trim(file_name), status='old',                 &
+                                                 position='append' )
+      end if
+    else
+      open( newunit=fid, file=trim(file_name), status='unknown')
+    end if
+    old = .true.
+
+    call write_tecplot_ordered_zone_header( fid, n_dim, n_nodes,               &
+                                           n_node_vars, n_cell_vars,           &
+                                           zone_name=zone_name,                &
+                                           var_names=var_names,                &
+                                           data_packing='block',               &
+                                           solution_time=solution_time,        &
+                                           strand_id=strand_id )
+    call write_tecplot_ordered_zone_block_packed( fid, n_nodes,                &
+                                                  n_node_vars, n_cell_vars,    &
+                                                  NODE_DATA, CELL_DATA )
+    close(fid)
+    deallocate( var_names, tmp_var, NODE_DATA )
+  end subroutine output_cell_reconstruction_limited
+
   subroutine get_cell_quad( gblock1, cell_idx, n_skip, quad_order, phys_quad )
     use grid_derived_type,       only : grid_block, get_cell_nodes
     use quadrature_derived_type, only : quad_t,                                &
@@ -6728,7 +7069,7 @@ contains
     call grid%gblock(1)%grid_vars%setup( grid%gblock(1) )
   end subroutine setup_grid_generate
 
-  subroutine setup_reconstruction1( grid, n_dim, n_vars, degree, rec, eval_fun, weights )
+  subroutine setup_reconstruction1( grid, n_dim, n_vars, degree, rec, eval_fun, weights, limit )
     use grid_derived_type,    only : grid_type
     use rec_derived_type,     only : rec_t
     use function_holder_type, only : func_h_t
@@ -6737,8 +7078,9 @@ contains
     type(rec_t),               intent(out) :: rec
     class(func_h_t), optional, intent(in)  :: eval_fun
     real(dp), dimension(0:degree), optional, intent(in) :: weights
+    logical, optional, intent(in) :: limit
 
-    rec = rec_t( grid, n_dim, degree, n_vars, ext_fun=eval_fun, weights=weights )
+    rec = rec_t( grid, n_dim, degree, n_vars, ext_fun=eval_fun, weights=weights, limit=limit )
   end subroutine setup_reconstruction1
 
 end module test_problem
@@ -6762,23 +7104,24 @@ program main
   type(basic_timer_t) :: timer
   integer :: degree, n_vars, n_dim
   integer, dimension(3) :: n_nodes, n_ghost, n_skip
-  logical :: old
+  logical :: old, limit
   real(dp), dimension(:,:), allocatable :: space_scale, space_origin
   real(dp), dimension(:), allocatable :: weights
   integer :: i
 
   degree  = 4
   n_vars  = 1
-  n_dim   = 2
-  n_nodes = [33,33,1]
+  n_dim   = 1
+  n_nodes = [33,1,1]
   n_ghost = [0,0,0]
   n_skip  = [1,1,1]
   old = .false.
+  limit = .false.
 
   allocate( space_scale(n_dim,n_vars) )
   allocate( space_origin(n_dim,n_vars) )
   allocate( weights(0:degree) )
-  space_scale = 0.2_dp
+  space_scale = 0.01_dp
   space_origin = 0.0_dp
   space_origin(1:n_dim,1) = 0.5_dp
   allocate( eval_fun, source=cts_t( n_dim, n_vars,     &
@@ -6793,7 +7136,7 @@ program main
   call setup_grid( n_dim, n_nodes, n_ghost, grid, delta=0.3_dp )!, x2_map=geom_space_wrapper )
 
   call timer%tic()
-  call setup_reconstruction1( grid, n_dim, n_vars, degree, rec, eval_fun=eval_fun )
+  call setup_reconstruction1( grid, n_dim, n_vars, degree, rec, eval_fun=eval_fun, limit=limit )
   call rec%solve( grid,ext_fun=eval_fun,ramp=.true.,tol=1.0e-10_dp,n_iter=1000, weights=weights,soln_name='test',output_quad_order=12)
   ! call rec%solve( grid,ext_fun=eval_fun,ramp=.true.,tol=1.0e-10_dp,n_iter=1000, weights=weights )
   write(*,*) 'Elapsed time: ', timer%toc()
