@@ -1384,7 +1384,7 @@ contains
     integer, dimension(n_dim) :: tmp_exp, nsub
     cnt = 0
     do curr_total_degree = 0,degree
-      idx(curr_total_degree+1) = cnt + 1
+      ! idx(curr_total_degree+1) = cnt + 1
       N_full_terms = (curr_total_degree+1) ** n_dim
       do j = 0,N_full_terms
         nSub = curr_total_degree + 1
@@ -1394,6 +1394,8 @@ contains
           exponents(:,cnt) = tmp_exp
         end if
       end do
+      idx(curr_total_degree+1) = cnt
+      tmp_exp = 0
     end do
   end subroutine get_exponents
 
@@ -3915,6 +3917,7 @@ module monomial_basis_derived_type
     procedure, public, pass :: eval  => evaluate_monomial
     procedure, public, pass :: deval => evaluate_monomial_derivative
     procedure, public, pass :: destroy => destroy_monomial_basis_t
+    procedure, public, pass :: get_derivative_expansion_exponent_terms
   end type monomial_basis_t
 
   interface monomial_basis_t
@@ -3992,6 +3995,27 @@ contains
       end do
     end do
   end subroutine evaluate_monomial_derivative
+
+  pure function get_derivative_expansion_exponent_terms(this,term) result(terms)
+    class(monomial_basis_t), intent(in) :: this
+    integer,                 intent(in) :: term
+    integer, dimension(this%n_dim)      :: terms
+    integer :: i, cnt, term_degree
+    integer, dimension(this%n_dim) :: curr_exponent
+
+    terms = -1
+    curr_exponent = this%exponents(:,term)
+    term_degree   = sum(curr_exponent)
+    if (term>this%idx(this%total_degree)) return
+    
+    cnt = 0
+    do i = this%idx(term_degree+1),this%idx(term_degree+2)
+      if (sum( abs(this%exponents(:,i) - curr_exponent) )==1) then
+        cnt = cnt + 1
+        terms(cnt) = i
+      end if
+    end do
+  end function get_derivative_expansion_exponent_terms
 
 end module monomial_basis_derived_type
 
@@ -4324,6 +4348,8 @@ module zero_mean_basis_derived_type
     procedure, nopass       :: length_scale  => get_length_scale_vector
     procedure, public, pass :: eval  => evaluate_basis
     procedure, public, pass :: deval => evaluate_basis_derivative
+    procedure, public, pass :: rec_eval => evaluate_reconstruction
+    procedure, public, pass :: drec_eval => evaluate_reconstruction_derivative
     procedure, public, pass :: scaled_basis_derivative, scaled_weighted_basis_derivative
     procedure, public, pass :: scaled_basis_derivatives
     procedure, public, pass :: destroy => destroy_zero_mean_basis_t
@@ -4615,7 +4641,269 @@ pure function scaled_basis_derivatives( this, p, term_start, term_end,         &
   end if
 end function scaled_basis_derivatives
 
+pure function evaluate_reconstruction( this, p, point, coefs, n_terms, n_var, var_idx ) result(val)
+    use set_constants, only : zero
+    class(zero_mean_basis_t),   intent(in) :: this
+    type(monomial_basis_t),     intent(in) :: p
+    real(dp), dimension(:),     intent(in) :: point
+    real(dp), dimension(:,:),   intent(in) :: coefs
+    integer,                    intent(in) :: n_terms, n_var
+    integer,  dimension(n_var), intent(in) :: var_idx
+    real(dp), dimension(n_var)             :: val
+    real(dp), dimension(n_terms) :: basis
+    integer :: v, n
+    val = zero
+    do n = 1,n_terms
+      basis(n) = this%eval(p,n,point)
+    end do
+    do v = 1,n_var
+      val(v) = val(v) + dot_product( coefs(1:n_terms,var_idx(v)), basis )
+    end do
+  end function evaluate_reconstruction
+
+  pure function evaluate_reconstruction_derivative( this, p, point, coefs, n_terms, n_var, var_idx, order ) result(val)
+    use set_constants, only : zero
+    class(zero_mean_basis_t),   intent(in) :: this
+    type(monomial_basis_t),     intent(in) :: p
+    real(dp), dimension(:),     intent(in) :: point
+    real(dp), dimension(:,:),   intent(in) :: coefs
+    integer,                    intent(in) :: n_terms, n_var
+    integer,  dimension(n_var), intent(in) :: var_idx
+    integer,  dimension(:),     intent(in) :: order
+    real(dp), dimension(n_var)             :: val
+    real(dp), dimension(n_terms) :: basis
+    integer :: v, n
+    val = zero
+    do n = 1,n_terms
+      basis(n) = this%deval(p,n,point,order)
+    end do
+    do v = 1,n_var
+      val(v) = val(v) + dot_product( coefs(1:n_terms,var_idx(v)), basis )
+    end do
+  end function evaluate_reconstruction_derivative
+
 end module zero_mean_basis_derived_type
+
+module zero_mean_limiter_type
+  use set_precision, only : dp
+  use monomial_basis_derived_type, only : monomial_basis_t
+  use zero_mean_basis_derived_type, only : zero_mean_basis_t
+  implicit none
+  private
+  public :: zero_mean_limit_t
+
+  type :: zero_mean_limit_t
+    integer  :: total_degree
+    integer  :: n_vars
+    integer,  dimension(:),   allocatable :: var_idx
+    real(dp), dimension(:,:), allocatable :: v_min, v_max, alpha
+  contains
+    private
+    procedure, public, pass :: destroy => destroy_limiter
+    procedure, public, pass :: update_min_max
+    procedure, public, pass :: update_limiter => update_alpha
+  end type zero_mean_limit_t
+  interface zero_mean_limit_t
+    module procedure constructor
+  end interface zero_mean_limit_t
+contains
+  pure elemental subroutine destroy_limiter( this )
+    class(zero_mean_limit_t), intent(inout) :: this
+    if ( allocated(this%v_min)   ) deallocate( this%v_min )
+    if ( allocated(this%v_max)   ) deallocate( this%v_max )
+    if ( allocated(this%alpha)   ) deallocate( this%alpha )
+    if ( allocated(this%var_idx) ) deallocate( this%var_idx )
+    this%total_degree = 0
+    this%n_vars       = 0
+  end subroutine destroy_limiter
+
+  pure function constructor( total_degree, n_vars, var_idx ) result( this )
+    use set_constants, only : one, large
+    integer,     intent(in) :: total_degree, n_vars
+    integer, dimension(:), intent(in) :: var_idx
+    type(zero_mean_limit_t) :: this
+    call this%destroy()
+    this%total_degree = total_degree
+    this%n_vars       = n_vars
+    allocate( this%v_min( total_degree, n_vars ) )
+    allocate( this%v_max( total_degree, n_vars ) )
+    allocate( this%alpha( total_degree, n_vars ) )
+    allocate( this%var_idx( n_vars ) )
+    this%var_idx = var_idx
+    this%v_min =  large
+    this%v_max = -large
+    this%alpha = one
+  end function constructor
+
+  pure subroutine update_min_max( this, p, basis, coefs )
+    class(zero_mean_limit_t), intent(inout) :: this
+    class(monomial_basis_t),  intent(in)    :: p
+    class(zero_mean_basis_t), intent(in)    :: basis
+    real(dp), dimension(:,:), intent(in)    :: coefs
+    integer :: v, d, term
+    real(dp) :: u_c
+    do v = 1,this%n_vars
+      do d = 1,p%total_degree
+        do term = p%idx(d)+1,p%idx(d+1)
+          u_c = get_c_val(p,basis,coefs(:,this%var_idx(v)),term)
+          this%v_min(d,v) = min( this%v_min(d,v), u_c )
+          this%v_max(d,v) = max( this%v_max(d,v), u_c )
+        end do
+      end do
+    end do
+  end subroutine update_min_max
+
+  pure subroutine update_alpha( this, p, basis, point, coefs )
+    class(zero_mean_limit_t), intent(inout) :: this
+    class(monomial_basis_t),  intent(in)    :: p
+    class(zero_mean_basis_t), intent(in)    :: basis
+    real(dp), dimension(:),   intent(in)    :: point
+    real(dp), dimension(:,:), intent(in)    :: coefs
+    integer :: v, d, term
+    real(dp) :: u_c
+    do v = 1,this%n_vars
+      do d = p%total_degree,2,-1
+        do term = p%idx(d)+1,p%idx(d+1)
+          call get_min_alpha_val(this,p,basis,coefs,term,point,this%alpha)
+          u_c = get_c_val(p,basis,coefs(:,this%var_idx(v)),term)
+          this%v_min(d,v) = min( this%v_min(d,v), u_c )
+          this%v_max(d,v) = max( this%v_max(d,v), u_c )
+        end do
+      end do
+      this%alpha(1,v) = max( this%alpha(1,v), this%alpha(2,v) )
+    end do
+  end subroutine update_alpha
+
+  pure function get_c_val(p,basis,coefs,term) result(u_c)
+    class(monomial_basis_t),  intent(in) :: p
+    class(zero_mean_basis_t), intent(in) :: basis
+    real(dp), dimension(:),   intent(in) :: coefs
+    integer,                  intent(in) :: term
+    real(dp)                             :: u_c
+    u_c = coefs(term) / product( basis%h_ref ** p%exponents(:,term) )
+  end function get_c_val
+
+  pure function get_grad(p,basis,coefs,term) result(grad)
+    use set_constants, only : zero
+    class(monomial_basis_t),  intent(in) :: p
+    class(zero_mean_basis_t), intent(in) :: basis
+    real(dp), dimension(:),   intent(in) :: coefs
+    integer,                  intent(in) :: term
+    real(dp), dimension(p%n_dim)         :: grad
+    integer,  dimension(p%n_dim) :: terms
+    integer :: i
+    grad = zero
+    terms = p%get_derivative_expansion_exponent_terms(term)
+    if (terms(1)<0) return
+    do i = 1,p%n_dim
+      grad(i) = get_c_val(p,basis,coefs,terms(i))
+    end do
+  end function get_grad
+
+  pure function local_linear_rec( n_dim, u_c, grad, dx ) result( val )
+    integer,                    intent(in) :: n_dim
+    real(dp),                   intent(in) :: u_c
+    real(dp), dimension(n_dim), intent(in) :: grad, dx
+    real(dp)                               :: val
+    val = u_c + dot_product(grad,dx)
+  end function local_linear_rec
+
+  pure function get_alpha_val(n_dim,u_c,u_min,u_max,grad,dx) result(alpha)
+    use set_constants, only : one, near_zero
+    integer,                    intent(in) :: n_dim
+    real(dp),                   intent(in) :: u_c, u_min, u_max
+    real(dp), dimension(n_dim), intent(in) :: grad, dx
+    real(dp)                               :: alpha
+    real(dp) :: u_i, delta, num, den
+    u_i = local_linear_rec(n_dim,u_c,grad,dx)
+    den = u_i - u_c
+    den = sign(one,den) * max(abs(den),near_zero)
+    num = merge(u_max,u_min,den>0)
+    alpha = min(one,num/den)
+  end function get_alpha_val
+
+  pure subroutine get_min_alpha_val(this,p,basis,coefs,term,point,alpha)
+    use set_constants, only : zero
+    class(zero_mean_limit_t), intent(in)    :: this
+    class(monomial_basis_t),  intent(in)    :: p
+    class(zero_mean_basis_t), intent(in)    :: basis
+    real(dp), dimension(:,:), intent(in)    :: coefs
+    integer,                  intent(in)    :: term
+    real(dp), dimension(:),   intent(in)    :: point
+    real(dp), dimension(this%total_degree,this%n_vars), intent(inout) :: alpha
+    real(dp), dimension(p%n_dim) :: grad, dx
+    integer, dimension(p%n_dim)  :: terms
+    integer :: i, v, order
+    real(dp) :: u_c, alpha_tmp
+    order = sum( p%exponents(:,term) )
+    dx = point(1:p%n_dim) - basis%x_ref
+    do v = 1,this%n_vars
+      grad = get_grad(p,basis,alpha(order,v)*coefs(:,this%var_idx(v)),term)
+      u_c  = get_c_val(p,basis,coefs(:,this%var_idx(v)),term)
+      alpha_tmp = get_alpha_val(p%n_dim,u_c,this%v_min(order,v),this%v_max(order,v),grad,dx)
+      alpha(order,v) = min(alpha(order,v),alpha_tmp)
+    end do
+  end subroutine get_min_alpha_val
+
+  ! pure function evaluate_reconstruction_derivative( basis, p, point, n_terms,              &
+  !                                        n_var, var_idx, order ) result(val)
+  !   use set_constants, only : zero
+  !   class(rec_cell_t),          intent(in) :: this
+  !   type(monomial_basis_t),     intent(in) :: p
+  !   real(dp), dimension(:),     intent(in) :: point
+  !   integer,                    intent(in) :: n_terms, n_var
+  !   integer,  dimension(n_var), intent(in) :: var_idx
+  !   integer,  dimension(:),     intent(in) :: order
+  !   real(dp), dimension(n_var)             :: val
+  !   real(dp), dimension(n_terms) :: basis
+  !   integer :: v, n
+  !   val = zero
+  !   do n = 1,n_terms
+  !     basis(n) = this%basis%deval(p,n,point,order)
+  !   end do
+  !   do v = 1,n_var
+  !     val(v) = val(v) + dot_product( this%coefs(1:n_terms,var_idx(v)), basis )
+  !   end do
+  ! end function evaluate_reconstruction_derivative
+
+
+end module zero_mean_limiter_type
+
+! module limiter_block_type
+!   use zero_mean_limiter_type, only : zero_mean_limit_t
+!   use zero_mean_basis_derived_type, only : zero_mean_basis_t
+!   use monomial_basis_derived_type,  only : monomial_basis_t
+!   implicit none
+!   private
+!   public :: limiter_block_t
+
+!   type limiter_block_t
+!     integer :: n_total_cells
+!     type(zero_mean_limit_t), dimension(:), allocatable :: lim
+!   contains
+!     private
+!     procedure, public, pass :: destroy => destroy_limiter_block
+!     procedure, public, pass :: update  => update_limiter
+!   end type limiter_block_t
+
+!   interface limiter_block_t
+!     module procedure constructor
+!   end interface limiter_block_t
+! contains
+!   pure elemental subroutine destroy_limiter_block( this )
+!     class(limiter_block_t), intent(inout) :: this
+!     if (allocated( this%lim) ) then
+!       call this%lim%destroy()
+!       deallocate( this%lim )
+!     end if
+!     n_total_cells = 0
+!   end subroutine destroy_limiter_block
+
+!   pure function constructor(p) result(this)
+!     type(monomial_basis_t), intent(in) :: p
+!     type(limiter_block_t) :: this
+!   end function constructor
+! end module limiter_block_type
 
 module reconstruct_cell_derived_type
   use set_precision,                only : dp
@@ -4819,16 +5107,39 @@ contains
     integer,                    intent(in) :: n_terms, n_var
     integer,  dimension(n_var), intent(in) :: var_idx
     real(dp), dimension(n_var)             :: val
-    real(dp), dimension(n_terms) :: basis
-    integer :: v, n
-    val = zero
-    do n = 1,n_terms
-      basis(n) = this%basis%eval(p,n,point)
-    end do
-    do v = 1,n_var
-      val(v) = val(v) + dot_product( this%coefs(1:n_terms,var_idx(v)), basis )
-    end do
+    ! real(dp), dimension(n_terms) :: basis
+    ! integer :: v, n
+    ! val = zero
+    ! do n = 1,n_terms
+    !   basis(n) = this%basis%eval(p,n,point)
+    ! end do
+    ! do v = 1,n_var
+    !   val(v) = val(v) + dot_product( this%coefs(1:n_terms,var_idx(v)), basis )
+    ! end do
+    val = this%basis%rec_eval( p, point, this%coefs, n_terms, n_var, var_idx )
   end function evaluate_reconstruction
+
+  pure function evaluate_reconstruction_derivative( this, p, point, n_terms,              &
+                                         n_var, var_idx, order ) result(val)
+    use set_constants, only : zero
+    class(rec_cell_t),          intent(in) :: this
+    type(monomial_basis_t),     intent(in) :: p
+    real(dp), dimension(:),     intent(in) :: point
+    integer,                    intent(in) :: n_terms, n_var
+    integer,  dimension(n_var), intent(in) :: var_idx
+    integer,  dimension(:),     intent(in) :: order
+    real(dp), dimension(n_var)             :: val
+    ! real(dp), dimension(n_terms) :: basis
+    ! integer :: v, n
+    ! val = zero
+    ! do n = 1,n_terms
+    !   basis(n) = this%basis%deval(p,n,point,order)
+    ! end do
+    ! do v = 1,n_var
+    !   val(v) = val(v) + dot_product( this%coefs(1:n_terms,var_idx(v)), basis )
+    ! end do
+    val = this%basis%drec_eval( p, point, this%coefs, n_terms, n_var, var_idx, order )
+  end function evaluate_reconstruction_derivative
 
   pure function get_cell_avg(quad,n_dim,n_var,var_idx,eval_fun) result(avg)
     use set_constants, only : zero
@@ -6039,6 +6350,7 @@ contains
                                           rec_out=.true.,                      &
                                           ext_out=.true.,                      &
                                           err_out=.true.,                      &
+                                          strand_id=1,                         &
                                           solution_time=zero )
       end do
     end if
@@ -6078,6 +6390,7 @@ contains
                                             rec_out=.true.,                  &
                                             ext_out=.true.,                  &
                                             err_out=.true.,                  &
+                                            strand_id=i+1,                   &
                                             solution_time=real(i,dp) )
         end if
 
@@ -6454,7 +6767,7 @@ program main
   real(dp), dimension(:), allocatable :: weights
   integer :: i
 
-  degree  = 3
+  degree  = 4
   n_vars  = 1
   n_dim   = 2
   n_nodes = [33,33,1]
@@ -6474,14 +6787,15 @@ program main
                                     space_scale=space_scale, &
                                     space_origin=space_origin) )
 
-  weights(0:degree) = one/[(real(2**(i-1),dp),i=1,degree+1)]
+  ! weights(0:degree) = one/[(real(2**(i-1),dp),i=1,degree+1)]
+  ! weights(0:degree) = one/[(real(i,dp),i=1,degree+1)]
   weights = one
   call setup_grid( n_dim, n_nodes, n_ghost, grid, delta=0.3_dp )!, x2_map=geom_space_wrapper )
 
   call timer%tic()
   call setup_reconstruction1( grid, n_dim, n_vars, degree, rec, eval_fun=eval_fun )
-  ! call rec%solve( grid,ext_fun=eval_fun,ramp=.true.,tol=1.0e-10_dp,n_iter=1000,soln_name='test',output_quad_order=12)
-  call rec%solve( grid,ext_fun=eval_fun,ramp=.true.,tol=1.0e-10_dp,n_iter=1000, weights=weights )
+  call rec%solve( grid,ext_fun=eval_fun,ramp=.true.,tol=1.0e-10_dp,n_iter=1000, weights=weights,soln_name='test',output_quad_order=12)
+  ! call rec%solve( grid,ext_fun=eval_fun,ramp=.true.,tol=1.0e-10_dp,n_iter=1000, weights=weights )
   write(*,*) 'Elapsed time: ', timer%toc()
   
   call rec%destroy()
