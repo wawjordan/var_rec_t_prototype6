@@ -1425,11 +1425,12 @@ contains
     use index_conversion, only : global2local
     integer, intent(in) :: n_dim, degree, n_terms
     integer, dimension(n_dim,n_terms), intent(out) :: exponents
-    integer, dimension(degree+1),      intent(out) :: idx
+    integer, dimension(0:degree+1),      intent(out) :: idx
     integer, dimension(n_dim,n_terms), optional, intent(out) :: diff_idx
     integer :: curr_total_degree, i, j, cnt, N_full_terms
     integer, dimension(n_dim) :: tmp_exp, nsub
     cnt = 0
+    idx(0) = 0
     do curr_total_degree = 0,degree
       ! idx(curr_total_degree+1) = cnt + 1
       N_full_terms = (curr_total_degree+1) ** n_dim
@@ -4009,7 +4010,7 @@ contains
     this%n_dim   = n_dim
     this%n_terms = nchoosek( n_dim + total_degree, total_degree )
     allocate( this%exponents( this%n_dim, this%n_terms ) )
-    allocate( this%idx(this%total_degree+1) )
+    allocate( this%idx(0:this%total_degree+1) )
     allocate( this%diff_idx( this%n_dim, this%n_terms ) )
     call get_exponents( this%n_dim, this%total_degree, this%n_terms,           &
                         this%exponents, this%idx, diff_idx=this%diff_idx )
@@ -4212,6 +4213,155 @@ contains
   end function eval_test_fun2
 
 end module test_function_2
+
+module cylinder_cone_bump
+  use set_precision, only : dp
+  use function_holder_type, only : func_h_t
+  use monomial_basis_derived_type, only : monomial_basis_t
+  implicit none
+  private
+  public :: ccb_t
+ 
+  type, extends(func_h_t) :: ccb_t
+    real(dp), dimension(:),   allocatable :: dt, t0
+    real(dp), dimension(:,:), allocatable :: dx, x0
+  contains
+    procedure :: eval    => eval_ccb
+    procedure :: destroy => destroy_ccb
+  end type ccb_t
+
+  interface ccb_t
+    procedure constructor
+  end interface ccb_t
+contains
+  function constructor(n_dim,n_eq,space_scale,space_origin,time_scale,time_origin) result(this)
+    use set_constants, only : zero, one, near_zero
+    integer,                                   intent(in) :: n_dim, n_eq
+    real(dp), dimension(n_dim,n_eq), optional, intent(in) :: space_scale, space_origin
+    real(dp), dimension(n_eq),       optional, intent(in) :: time_scale,  time_origin
+    type(ccb_t)                                           :: this
+    call this%destroy()
+    call this%initialize_super(n_eq,n_dim)
+    allocate( this%dt(n_eq) )
+    allocate( this%t0(n_eq) )
+    allocate( this%dx(n_dim,n_eq) )
+    allocate( this%x0(n_dim,n_eq) )
+    this%dt = one
+    this%dx = one
+    this%t0 = zero
+    this%x0 = zero
+    if ( present(space_scale) ) then
+      this%dx = sign(one,space_scale) * max(near_zero,abs(space_scale))
+    end if
+    if ( present(space_origin) ) this%x0 = space_origin
+    if ( present(time_scale) ) then
+      this%dt = sign(one,time_scale) * max(near_zero,abs(time_scale))
+    end if
+    if ( present(time_origin) ) this%t0 = time_origin
+  end function constructor
+
+  pure elemental subroutine destroy_ccb(this)
+    class(ccb_t), intent(inout) :: this
+    if ( allocated(this%dt)   ) deallocate( this%dt   )
+    if ( allocated(this%dx)   ) deallocate( this%dx   )
+    if ( allocated(this%t0)   ) deallocate( this%t0   )
+    if ( allocated(this%x0)   ) deallocate( this%x0   )
+  end subroutine destroy_ccb
+
+  pure elemental function radius(x,y,x0,y0) result(r)
+    real(dp), parameter :: r0          = 0.15_dp
+    real(dp), intent(in) :: x, y, x0, y0
+    real(dp)             :: r
+    r = sqrt( (x-x0)**2 + (y-y0)**2 ) / r0
+  end function radius
+
+  pure function slotted_cylinder(x,y) result(G)  
+    use set_constants, only : one, zero
+    real(dp),     intent(in) :: x, y
+    real(dp)                 :: G
+    logical :: in_circle, cond1, cond2
+    real(dp),               parameter :: slot_width  = 0.025_dp
+    real(dp),               parameter :: slot_height = 0.85_dp
+    real(dp), dimension(2), parameter :: x0_cyl = [0.50_dp,0.75_dp]
+    in_circle = radius(x,y,x0_cyl(1),x0_cyl(2)) <= one
+    cond1 = abs(x-x0_cyl(1))>=slot_width
+    cond2 = y>=slot_height
+    G = merge(one,zero,in_circle.and.(cond1.or.cond2))
+  end function slotted_cylinder
+
+  pure function sharp_cone(x,y) result(G)
+    use set_constants, only : one, zero
+    real(dp),     intent(in) :: x, y
+    real(dp)                 :: G
+    real(dp) :: r
+    logical :: in_circle
+    real(dp), dimension(2), parameter :: x0_con = [0.50_dp,0.25_dp]
+    r = radius(x,y,x0_con(1),x0_con(2))
+    in_circle = r <= one
+    G = merge(one-r,zero,in_circle)
+  end function sharp_cone
+
+  pure function smooth_bump(x,y) result(G)
+    use set_constants, only : one, zero, pi, fourth
+    real(dp),     intent(in) :: x, y
+    real(dp)                 :: G
+    real(dp) :: r
+    logical :: in_circle
+    real(dp), dimension(2), parameter :: x0_bum = [0.25_dp,0.50_dp]
+    r = radius(x,y,x0_bum(1),x0_bum(2))
+    in_circle = r <= one
+    G = merge(fourth*(one+cos(pi*r)),zero,in_circle)
+  end function smooth_bump
+
+  pure function rotate(this,x,theta) result(G)
+    class(ccb_t), intent(in) :: this
+    real(dp), dimension(:), intent(in) :: x
+    real(dp),               intent(in) :: theta
+    real(dp)                           :: G
+    real(dp), dimension(2) :: xy1, xy2
+    integer :: i
+    xy1  = 0.75_dp
+    do i = 1,min(this%n_dim,2)
+      xy1(i) = x(i)
+    end do
+    ! rotate the point
+    xy2(1) = xy1(1) * cos(theta) - xy1(2) * sin(theta)
+    xy2(2) = xy1(1) * sin(theta) + xy1(2) * cos(theta)
+    G = slotted_cylinder( xy2(1), xy2(2) ) &
+      + sharp_cone(       xy2(1), xy2(2) ) &
+      + smooth_bump(      xy2(1), xy2(2) )
+  end function rotate
+
+  pure function eval_ccb( this, x, t ) result(q)
+    use set_precision, only : dp
+    use set_constants, only : zero, pi
+    class(ccb_t),           intent(in) :: this
+    real(dp), dimension(:), intent(in) :: x
+    real(dp), optional,     intent(in) :: t
+    real(dp), dimension(this%n_eq)     :: q
+    real(dp), dimension(this%n_dim,this%n_eq) :: x_bar
+    real(dp), dimension(this%n_eq)            :: t_bar
+    integer :: coef, i, n
+    ! do i = 1,this%n_eq
+    !   x_bar(:,i) = (x(1:this%n_dim) - this%x0(:,i)) / this%dx(:,i)
+    ! end do
+    ! t_bar = zero
+    ! if ( present(t) ) then
+    !   t_bar = ( t - this%t0 ) / this%dt
+    ! end if
+    do i = 1,this%n_eq
+      x_bar(:,i) = x(1:this%n_dim)/this%dx(:,i) + this%x0(:,i)
+    end do
+    t_bar = zero
+    if ( present(t) ) then
+      t_bar = t/this%dt + this%t0
+    end if
+    do i = 1,this%n_eq
+      q(i) = rotate( this, x_bar(:,i) , pi * t_bar(i) )
+    end do
+  end function eval_ccb
+
+end module cylinder_cone_bump
 
 module cross_term_sinusoid
   use set_precision, only : dp
@@ -4821,7 +4971,7 @@ contains
     tcoefs = basis%transform_coefs(p,coefs,p%n_terms,this%n_vars,this%var_idx)
     do v = 1,this%n_vars
       do d = 1,p%total_degree
-        do term = p%idx(d)+1,p%idx(d+1)
+        do term = p%idx(d-1)+1,p%idx(d)
           this%v_min(d,v) = min( this%v_min(d,v), tcoefs(term,v) )
           this%v_max(d,v) = max( this%v_max(d,v), tcoefs(term,v) )
         end do
@@ -4848,7 +4998,7 @@ contains
 
   ! call this for the corresponding cell
   pure subroutine update_alpha( this, p, basis, point, coefs )
-    use set_constants, only : zero, large
+    use set_constants, only : zero, one, large
     class(zero_mean_limit_t), intent(inout) :: this
     class(monomial_basis_t),  intent(in)    :: p
     class(zero_mean_basis_t), intent(in)    :: basis
@@ -4858,30 +5008,36 @@ contains
     integer, dimension(p%n_dim) :: grad_idx
     real(dp), dimension(p%n_dim) :: grad, dx
     real(dp) :: alpha
+    real(dp), parameter :: tol = 0.01_dp
     integer :: v, d, term
     tcoefs = basis%transform_coefs(p,coefs,p%n_terms,this%n_vars,this%var_idx)
     dx = point(1:p%n_dim) - basis%x_ref
+    this%alpha = one
     do v = 1,this%n_vars
-      do d = p%total_degree-1,1,-1
-        alpha = large
-        do term = p%idx(d)+1,p%idx(d+1)
+      ! start at the highest degree
+      do d = p%total_degree,1,-1
+        this%alpha(d,v) = large
+        do term = p%idx(d-1)+1,p%idx(d)
           grad_idx = p%diff_idx(:,term)
-          if ( any(grad_idx<1) ) then
-            grad = zero
-          else
-            grad = this%alpha(d+1,v)*tcoefs(grad_idx,v)
-            ! grad = tcoefs(grad_idx,v)
-          end if
+          grad = tcoefs(grad_idx,v)
           associate( u_c   => tcoefs(term,v),  &
                      u_min => this%v_min(d,v), &
                      u_max => this%v_max(d,v) )
-            alpha = min( alpha, get_alpha_val(p%n_dim,grad,dx,u_c,u_min,u_max) )
+            this%alpha(d,v) = min( this%alpha(d,v), get_alpha_val(p%n_dim,grad,dx,u_c,u_min,u_max) )
           end associate
         end do
-        this%alpha(d+1,v) = alpha
+        this%alpha(d,v) = maxval(this%alpha(d:p%total_degree,v))
+        if ( abs(this%alpha(d,v) - one )< tol ) exit
+        !   exit
+        ! else
+        !   alpha = this%alpha(d,v)
+        ! end if
       end do
-      ! this%alpha(1,v) = max(this%alpha(1,v),this%alpha(2,v))
+      this%alpha(1,v) = max(this%alpha(1,v),this%alpha(2,v))
     end do
+    if ( any( abs(this%alpha - one )> tol ) ) then
+      alpha = this%alpha(1,1)
+    end if
   end subroutine update_alpha
 
   pure function evaluate_limited_reconstruction( this, basis, p, point, n_terms,              &
@@ -4902,7 +5058,7 @@ contains
       local_basis(n) = basis%eval(p,n,point)
     end do
     do v = 1,this%n_vars
-      val(v) = coefs(1,this%var_idx(v))
+      val(v) = coefs(1,this%var_idx(v)) ! cell average
       do d = 1,p%total_degree
         alpha_tmp = this%alpha(d,v)
         do n = p%idx(d)+1,p%idx(d+1)
@@ -5019,6 +5175,7 @@ contains
     this%self_idx   = self_idx
     this%self_block = self_block
     this%n_nbor     = n_nbor
+    this%n_interior = n_interior
     allocate( this%nbor_block( n_nbor ) )
     allocate( this%nbor_idx(   n_nbor ) )
     allocate( this%coefs( p%n_terms, n_vars ) )
@@ -5044,7 +5201,6 @@ contains
       this%LU  = zero
       this%P   = zero
       this%face_id    = face_id
-      this%n_interior = n_interior
     else
       allocate( this%Ainv(  p%n_terms-1, n_nbor ) )
       allocate( this%col_scale( p%n_terms-1     ) )
@@ -5885,6 +6041,7 @@ contains
       integer,                intent(in)  :: blk, lin_idx, min_sz
       integer,                intent(out) :: n_nbors
       integer, dimension(6*min_sz), intent(out) :: nbor_block, nbor_idx
+      integer, dimension(6*min_sz) :: tmp
       integer, dimension(3) :: idx_tmp, lo, hi
       lo = 1
       hi = 1
@@ -5892,7 +6049,13 @@ contains
       idx_tmp = 1
       idx_tmp(1:this%n_dim) = global2local_bnd( lin_idx, lo(1:this%n_dim), hi(1:this%n_dim) )
       call grow_stencil_basic( blk, idx_tmp, hi, min_sz, n_nbors, nbor_block, nbor_idx )
-      n_nbors = n_nbors - 1 ! don't include the central cell
+
+      ! don't include the central cell
+      tmp = nbor_block
+      nbor_block(1:n_nbors-1) = tmp(2:n_nbors)
+      tmp = nbor_idx
+      nbor_idx(1:n_nbors-1) = tmp(2:n_nbors)
+      n_nbors = n_nbors - 1
     end subroutine get_k_exact_nbors
 
     pure subroutine get_cell_LHS_k( this, lin_idx, term_end, LHS_m, LHS_n, LHS, scale, col_scale )
@@ -6317,16 +6480,31 @@ contains
   end function constructor
 
   pure subroutine update_limiter_block( this, rblock, gblock )
+    use set_constants,     only : large
     use index_conversion,  only : global2local
     use grid_derived_type, only : grid_block
     class(limiter_block_t), intent(inout) :: this
     type(rec_block_t),      intent(in)    :: rblock
     type(grid_block),       intent(in)    :: gblock
-    integer :: i, n, j
+    integer :: i, n, j, n_interior
     integer, dimension(3) :: idx
+    integer, dimension(:,:), allocatable :: debug_nbor_idx
     
     ! first get the min-max values for coefficients
     do i = 1,this%n_cells_total
+      this%lim(i)%v_max = -large
+      this%lim(i)%v_min =  large
+      ! if ( i == 4160 ) then
+      !   n_interior = rblock%cells(i)%n_interior
+      !   allocate( debug_nbor_idx(3,n_interior+1) )
+      !   debug_nbor_idx(:,1) = global2local(i,gblock%n_cells)
+      !   do n = 1,n_interior
+      !     j = rblock%cells(i)%nbor_idx(n)
+      !     debug_nbor_idx(:,n+1) = global2local(j,gblock%n_cells)
+      !   end do
+      !   debug_nbor_idx = -1
+      !   deallocate( debug_nbor_idx )
+      ! end if
       call this%lim(i)%update_min_max(rblock%p,rblock%cells(i)%basis,rblock%cells(i)%coefs)
       do n = 1,rblock%cells(i)%n_interior
         j = rblock%cells(i)%nbor_idx(n)
@@ -7095,6 +7273,7 @@ program main
   use timer_derived_type, only : basic_timer_t
   use function_holder_type, only : func_h_t
   use cross_term_sinusoid,  only : cts_t
+  use cylinder_cone_bump,   only : ccb_t
 
   implicit none
 
@@ -7111,33 +7290,40 @@ program main
 
   degree  = 4
   n_vars  = 1
-  n_dim   = 1
-  n_nodes = [33,1,1]
+  n_dim   = 2
+  n_nodes = [33,33,1]
   n_ghost = [0,0,0]
   n_skip  = [1,1,1]
   old = .false.
-  limit = .false.
+  limit = .true.
 
   allocate( space_scale(n_dim,n_vars) )
   allocate( space_origin(n_dim,n_vars) )
   allocate( weights(0:degree) )
-  space_scale = 0.01_dp
+  ! space_scale = 0.01_dp
+  space_scale   = 1.0_dp
   space_origin = 0.0_dp
-  space_origin(1:n_dim,1) = 0.5_dp
-  allocate( eval_fun, source=cts_t( n_dim, n_vars,     &
-                                    rand_coefs=.true., &
-                                    rand_seed=2,       &
+  ! space_origin(1:n_dim,:) = 0.0_dp
+  ! space_scale   = 2.0_dp
+  ! space_origin(1,:) = 0.25_dp
+  ! space_origin(2,:) = 0.5_dp
+  ! allocate( eval_fun, source=cts_t( n_dim, n_vars,     &
+  !                                   rand_coefs=.true., &
+  !                                   rand_seed=2,       &
+  !                                   space_scale=space_scale, &
+  !                                   space_origin=space_origin) )
+  allocate( eval_fun, source=ccb_t( n_dim, n_vars,     &
                                     space_scale=space_scale, &
                                     space_origin=space_origin) )
 
   ! weights(0:degree) = one/[(real(2**(i-1),dp),i=1,degree+1)]
   ! weights(0:degree) = one/[(real(i,dp),i=1,degree+1)]
   weights = one
-  call setup_grid( n_dim, n_nodes, n_ghost, grid, delta=0.3_dp )!, x2_map=geom_space_wrapper )
+  call setup_grid( n_dim, n_nodes, n_ghost, grid, delta=0.0_dp )!, x2_map=geom_space_wrapper )
 
   call timer%tic()
   call setup_reconstruction1( grid, n_dim, n_vars, degree, rec, eval_fun=eval_fun, limit=limit )
-  call rec%solve( grid,ext_fun=eval_fun,ramp=.true.,tol=1.0e-10_dp,n_iter=1000, weights=weights,soln_name='test',output_quad_order=12)
+  call rec%solve( grid,ext_fun=eval_fun,ramp=.false.,tol=1.0e-10_dp,n_iter=1000, weights=weights,soln_name='test',output_quad_order=12)
   ! call rec%solve( grid,ext_fun=eval_fun,ramp=.true.,tol=1.0e-10_dp,n_iter=1000, weights=weights )
   write(*,*) 'Elapsed time: ', timer%toc()
   
