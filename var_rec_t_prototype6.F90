@@ -5483,6 +5483,71 @@ contains
     D = D * xdij_mag
   end subroutine get_nbor_contribution
 
+  !  subroutine get_LHS_dirichlet( this, fquad, term_start, term_end, A )
+  !   use set_constants, only : zero, one
+  !   class(cell_rec_t),                            intent(in) :: this
+  !   class(quad_t),                                intent(in) :: fquad
+  !   integer,                                      intent(in) :: term_start, term_end
+  !   real(dp), dimension(term_end - term_start, term_end - term_start), intent(out) :: A
+  !   real(dp), dimension(term_end-term_start) :: dbasis
+  !   ! real(dp), dimension(term_end,term_end) :: d_basis_i
+  !   integer :: q, l, m
+  !   real(dp), dimension(this%basis%n_dim) :: dib, face_x_ref
+  !   real(dp) :: xdib_mag
+
+  !   A = zero
+  !   face_x_ref = fquad%integrate(this%basis%n_dim,fquad%quad_pts) / sum( fquad%quad_wts )
+
+  !   dib = abs( this%basis%x_ref - face_x_ref )
+  !   xdib_mag = one/norm2(dib)
+  !   do q = 1,fquad%n_quad
+  !     do m = 1,term_end-term_start
+  !       d_basis_i = this%basis%scaled_basis_derivatives( p,                      &
+  !                                                      0,                      &
+  !                                                      term_end,               &
+  !                                                      fquad%quad_pts(:,q),    &
+  !                                                      dib, weights=weights )
+  !       dbasis(m) = this%basis%scaled_basis_derivative(m,1,fquad%quad_pts(:,q),dib)
+  !     end do
+  !     do m = 1,term_end-term_start
+  !       do l = 1,term_end-term_start
+  !         A(l,m)   = A(l,m)   + fquad%quad_wts(q) * xdib_mag * basis(l) * basis(m)
+  !       end do
+  !     end do
+  !   end do
+
+  ! end subroutine get_LHS_dirichlet
+
+  ! pure subroutine get_RHS_dirichlet( this, fquad, term_start, term_end, var_idx, bc_eval, b )
+  !   use set_constants, only : zero, one
+  !   class(var_rec_t),                                         intent(in)  :: this
+  !   class(quad_t),                                            intent(in)  :: fquad
+  !   integer,                                                  intent(in)  :: term_start, term_end
+  !   integer,  dimension(:),                                   intent(in)  :: var_idx
+  !   real(dp), dimension(size(var_idx),fquad%n_quad),          intent(in)  :: bc_eval
+  !   real(dp), dimension(term_end - term_start,size(var_idx)), intent(out) :: b
+  !   real(dp), dimension(term_end-term_start) :: basis
+  !   integer :: v, q, l, m
+  !   real(dp), dimension(this%basis%n_dim) :: dib, face_x_ref
+  !   real(dp) :: xdib_mag
+
+  !   face_x_ref = fquad%integrate(this%basis%n_dim,fquad%quad_pts) / sum( fquad%quad_wts )
+
+  !   dib = abs( this%basis%x_ref - face_x_ref )
+  !   xdib_mag = one/norm2(dib)
+  !   do q = 1,fquad%n_quad
+  !     do l = 1,term_end-term_start
+  !       basis(l) = this%basis%eval( l,fquad%quad_pts(:,q) )
+  !     end do
+  !     do v = 1,size(var_idx)
+  !       do l = 1,term_end-term_start
+  !         b(l,v) = b(l,v) + fquad%quad_wts(q) * xdib_mag * basis(l) * ( bc_eval(v,q) - this%coefs(1,var_idx(v)) )
+  !       end do
+  !     end do
+  !   end do
+
+  ! end subroutine get_RHS_dirichlet
+
   pure function get_self_RHS_contribution( this, term_start, term_end,         &
                                            n_var, var_idx ) result(b)
     use set_constants, only : zero, one
